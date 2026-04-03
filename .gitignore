@@ -1,0 +1,56 @@
+# ── Python ────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+instalador/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+ENV/
+
+# ── Proyecto SCW – archivos generados ────────────────────────────
+# PDFs descargados (pueden ser cientos de archivos)
+expediente_pdfs/
+expedientes/
+
+# PDF unificado (puede ser muy grande)
+expediente_unificado.pdf
+
+# PDFs divididos por año
+expediente_por_año/
+
+# Log de actividad
+scw.log
+
+# Archivo de errores de descarga
+_errores.txt
+
+# Temporales de Ghostscript
+scw_comp_*/
+
+# ── IDEs y editores ───────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Playwright ────────────────────────────────────────────────────
+# Binarios del navegador (se instalan con: playwright install chromium)
+# No commitear — son ~200 MB
+playwright-browsers/
+
+# ── Misceláneos ───────────────────────────────────────────────────
+*.bak
+*.tmp
