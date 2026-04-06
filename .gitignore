@@ -51,6 +51,9 @@ Thumbs.db
 # No commitear — son ~200 MB
 playwright-browsers/
 
+# Descargas y staging del instalador (Ghostscript .exe, 7z, etc.)
+instalacion/redist/
+
 # ── Misceláneos ───────────────────────────────────────────────────
 *.bak
 *.tmp
