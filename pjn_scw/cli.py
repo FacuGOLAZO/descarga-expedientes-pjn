@@ -595,6 +595,27 @@ async def _firma_vista_tabla(page) -> str:
     except Exception:
         return ""
 
+async def _snapshot_paginacion(page) -> dict:
+    """Estado observable antes/después del click en Siguiente (varios criterios)."""
+    return await page.evaluate('''() => {
+        const td = document.querySelector(
+            "#expediente\\\\:action-table tbody tr:first-child td:nth-child(3)"
+        );
+        const fecha = td ? td.innerText.trim() : "";
+        const li = document.querySelector(
+            '[id$=":divPagesAct"] li.active span:last-child'
+        );
+        const pag = li ? li.innerText.trim() : "?";
+        const row = document.querySelector("#expediente\\\\:action-table tbody tr");
+        const a = row ? row.querySelector('a[href*="download=true"]') : null;
+        const href = a ? (a.getAttribute("href") || "").trim() : "";
+        const n = document.querySelectorAll(
+            "#expediente\\\\:action-table tbody tr"
+        ).length;
+        return { fecha, pag, href, n };
+    }''')
+
+
 async def _ir_siguiente_pagina(page, timeout_ajax: int) -> bool:
     siguiente = await page.query_selector('[id$=":divPagesAct"] span[title="Siguiente"]')
     if not siguiente:
@@ -603,29 +624,43 @@ async def _ir_siguiente_pagina(page, timeout_ajax: int) -> bool:
     if (await padre.evaluate('el => el.tagName')).upper() != 'A':
         return False
     firma_antes = await _firma_vista_tabla(page)
-    primera_antes = await page.evaluate('''() => {
-        const td = document.querySelector(
-            "#expediente\\\\:action-table tbody tr:first-child td:nth-child(3)"
-        );
-        return td ? td.innerText.trim() : "";
-    }''')
+    snap_antes = await _snapshot_paginacion(page)
     await padre.as_element().click()
     cambio_detectado = False
+    # Varias señales: en páginas seguidas la fecha de la 1.ª fila a menudo se repite;
+    # antes solo mirábamos eso y se agotaba timeout_ajax (p. ej. 30s) al pedo.
     try:
         await page.wait_for_function(
             f'''() => {{
                 const td = document.querySelector(
                     "#expediente\\\\:action-table tbody tr:first-child td:nth-child(3)"
                 );
-                return td && td.innerText.trim() !== {repr(primera_antes)};
+                const fechaNow = td ? td.innerText.trim() : "";
+                const li = document.querySelector(
+                    '[id$=":divPagesAct"] li.active span:last-child'
+                );
+                const pagNow = li ? li.innerText.trim() : "?";
+                const row = document.querySelector(
+                    "#expediente\\\\:action-table tbody tr"
+                );
+                const a = row ? row.querySelector('a[href*="download=true"]') : null;
+                const hrefNow = a ? (a.getAttribute("href") || "").trim() : "";
+                const n = document.querySelectorAll(
+                    "#expediente\\\\:action-table tbody tr"
+                ).length;
+                return fechaNow !== {json.dumps(snap_antes["fecha"])}
+                    || pagNow !== {json.dumps(snap_antes["pag"])}
+                    || hrefNow !== {json.dumps(snap_antes["href"])}
+                    || n !== {snap_antes["n"]};
             }}''',
             timeout=timeout_ajax * 1000,
+            polling=150,
         )
         cambio_detectado = True
     except PWTimeout:
         log.warning(
-            "Paginación: sin cambio visible en la 1.ª fila tras %ds; "
-            "comprobando si la tabla avanzó.",
+            "Paginación: ningún criterio (página activa / 1.er enlace / #filas / fecha "
+            "1.ª fila) cambió tras %ds; se revisa la firma de la tabla.",
             timeout_ajax,
         )
     # Si detectamos el cambio por AJAX no hace falta esperar un "sleep" fijo.
@@ -640,7 +675,7 @@ async def _ir_siguiente_pagina(page, timeout_ajax: int) -> bool:
         )
         return False
     if not cambio_detectado and firma_despues != firma_antes:
-        log.info("Paginación: avance detectado por firma de tabla (sin cambio en 1.ª celda).")
+        log.info("Paginación: avance confirmado por firma de tabla tras el timeout.")
     return True
 
 async def _obtener_pagina_actual(page) -> int:
