@@ -140,6 +140,22 @@ CFG = {
     "solo_año":          _cs("division", "solo_año",          "") or None,
 }
 
+
+def _path_cfg(path_like: Path | str) -> Path:
+    """
+    Rutas relativas del config.ini: si existe bajo la raíz del proyecto
+    (carpeta del config), usar esa; si no, respecto del cwd.
+    Rutas absolutas se devuelven sin cambiar.
+    """
+    p = Path(path_like)
+    if p.is_absolute():
+        return p
+    en_proyecto = (project_base() / p).resolve()
+    if en_proyecto.exists():
+        return en_proyecto
+    return (Path.cwd() / p).resolve()
+
+
 # Constantes de diseño
 COLOR_AZUL = (0.12, 0.31, 0.58)
 COLOR_NEG  = (0.1, 0.1, 0.1)
@@ -258,7 +274,7 @@ def cmd_estado(_args):
     print(f"{'═'*58}")
 
     # PDFs descargados
-    carpeta_pdfs = CFG["carpeta_pdfs"]
+    carpeta_pdfs = _path_cfg(CFG["carpeta_pdfs"])
     if carpeta_pdfs.exists():
         pdfs = sorted(carpeta_pdfs.glob("*.pdf"))
         errores = carpeta_pdfs / "_errores.txt"
@@ -273,7 +289,7 @@ def cmd_estado(_args):
         print(f"\n  📥 PDFs descargados  — carpeta no creada aún")
 
     # PDF unificado
-    unificado = CFG["archivo_unificado"]
+    unificado = _path_cfg(CFG["archivo_unificado"])
     print(f"\n  📄 PDF unificado  ({unificado})")
     if unificado.exists():
         reader = None
@@ -289,7 +305,7 @@ def cmd_estado(_args):
         print(f"     Existe    : no")
 
     # PDFs por año
-    carpeta_años = CFG["carpeta_años"]
+    carpeta_años = _path_cfg(CFG["carpeta_años"])
     print(f"\n  📂 PDFs por año  ({carpeta_años})")
     if carpeta_años.exists():
         partes = sorted(carpeta_años.glob("expediente_*.pdf"))
@@ -405,45 +421,73 @@ def _guardar_registro(carpeta: Path, data: dict):
                     encoding="utf-8")
 
 
-def listar_expedientes(carpeta_base: Path | None = None) -> list[dict]:
+def _expediente_desde_carpeta(sub: Path) -> dict | None:
+    """Construye el dict de listado si `sub` tiene _registro.json; si no, None."""
+    reg_path = sub / NOMBRE_REGISTRO
+    if not sub.is_dir() or not reg_path.is_file():
+        return None
+    try:
+        reg = json.loads(reg_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    docs      = reg.get("documentos", {})
+    pdfs      = list(sub.glob("*.pdf"))
+    tam_bytes = sum(p.stat().st_size for p in pdfs)
+
+    return {
+        "nombre":       reg.get("nombre", sub.name),
+        "carpeta":      sub.resolve(),
+        "url":          reg.get("url", ""),
+        "cid":          reg.get("cid", ""),
+        "jurisdiccion": reg.get("jurisdiccion", ""),
+        "numero":       reg.get("numero", ""),
+        "anio":         reg.get("anio", ""),
+        "total":        reg.get("total_documentos", len(docs)),
+        "descargados":  len([d for d in docs.values() if d.get("descargado_en")]),
+        "errores":      len([d for d in docs.values() if d.get("error")]),
+        "ultima_act":   reg.get("ultima_actualizacion", ""),
+        "tam_mb":       tam_bytes / 1_048_576,
+    }
+
+
+def listar_expedientes(en_carpeta: Path | None = None) -> list[dict]:
     """
-    Escanea la carpeta base y devuelve info de cada expediente registrado.
-    Cada entrada: {nombre, carpeta, url, total, descargados, nuevos, ultima_act, tam_mb}
+    Escanea expedientes registrados (carpetas con _registro.json):
+    - Subcarpetas de ``carpeta_base`` (p.ej. expedientes/caso1/).
+    - La carpeta ``carpeta_salida`` del config si tiene _registro.json en la raíz
+      (descargas directas a expediente_pdfs/).
+    - Subcarpetas de ``carpeta_salida`` que tengan registro.
     """
-    base = carpeta_base or CFG["carpeta_base"]
-    if not base.exists():
-        return []
+    base_default = en_carpeta or CFG["carpeta_base"]
+    base = _path_cfg(base_default)
+    salida = _path_cfg(CFG["carpeta_pdfs"])
 
-    resultado = []
-    for sub in sorted(base.iterdir()):
-        if not sub.is_dir():
-            continue
-        reg_path = sub / NOMBRE_REGISTRO
-        if not reg_path.exists():
-            continue
-        try:
-            reg = json.loads(reg_path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
+    resultado: list[dict] = []
+    vistos: set[Path] = set()
 
-        docs      = reg.get("documentos", {})
-        pdfs      = list(sub.glob("*.pdf"))
-        tam_bytes = sum(p.stat().st_size for p in pdfs)
+    def agregar(sub: Path) -> None:
+        item = _expediente_desde_carpeta(sub)
+        if not item:
+            return
+        clave = item["carpeta"]
+        if clave in vistos:
+            return
+        vistos.add(clave)
+        resultado.append(item)
 
-        resultado.append({
-            "nombre":      reg.get("nombre", sub.name),
-            "carpeta":     sub,
-            "url":         reg.get("url", ""),
-            "cid":         reg.get("cid", ""),
-            "jurisdiccion": reg.get("jurisdiccion", ""),
-            "numero":      reg.get("numero", ""),
-            "anio":        reg.get("anio", ""),
-            "total":       reg.get("total_documentos", len(docs)),
-            "descargados": len([d for d in docs.values() if d.get("descargado_en")]),
-            "errores":     len([d for d in docs.values() if d.get("error")]),
-            "ultima_act":  reg.get("ultima_actualizacion", ""),
-            "tam_mb":      tam_bytes / 1_048_576,
-        })
+    if base.is_dir():
+        for sub in sorted(base.iterdir()):
+            agregar(sub)
+
+    if salida.is_dir() and salida.resolve() != base.resolve():
+        if (salida / NOMBRE_REGISTRO).is_file():
+            agregar(salida)
+        for sub in sorted(salida.iterdir()):
+            if sub.is_dir():
+                agregar(sub)
+
+    resultado.sort(key=lambda e: e["nombre"].lower())
     return resultado
 
 
@@ -1114,8 +1158,8 @@ async def _run_descargar(args):
     if carpeta_override:
         carpeta = Path(carpeta_override)
     else:
-        carpeta_base = CFG["carpeta_base"]
-        carpeta_base.mkdir(exist_ok=True)
+        carpeta_base = _path_cfg(CFG["carpeta_base"])
+        carpeta_base.mkdir(parents=True, exist_ok=True)
         carpeta = carpeta_base / nombre_expediente
 
     carpeta.mkdir(parents=True, exist_ok=True)
@@ -1368,8 +1412,8 @@ def cmd_unir(args):
         (_REPORTLAB_OK,  "reportlab", "reportlab"),
     ])
 
-    carpeta    = (args.carpeta or CFG["carpeta_pdfs"])
-    salida     = (args.salida  or CFG["archivo_unificado"])
+    carpeta    = _path_cfg(args.carpeta) if args.carpeta else _path_cfg(CFG["carpeta_pdfs"])
+    salida     = _path_cfg(args.salida) if args.salida else _path_cfg(CFG["archivo_unificado"])
     calidad    = args.calidad  or CFG["calidad"]
     workers    = args.workers  or CFG["workers"]
     sin_comp   = args.sin_comprimir or CFG["sin_comprimir"]
@@ -1590,8 +1634,12 @@ def _dividir_en_partes(pages, max_bytes, nombre_base, carpeta):
 def cmd_dividir(args):
     _verificar_deps([(_PYPDF_OK, "pypdf", "pypdf")])
 
-    entrada   = getattr(args, "entrada", None) or CFG["archivo_unificado"]
-    carpeta   = getattr(args, "salida",  None) or CFG["carpeta_años"]
+    entrada   = _path_cfg(
+        getattr(args, "entrada", None) or CFG["archivo_unificado"]
+    )
+    carpeta   = _path_cfg(
+        getattr(args, "salida", None) or CFG["carpeta_años"]
+    )
     max_bytes = int((getattr(args, "max_mb",   None) or CFG["max_mb"]) * 1_048_576)
     solo_año  = getattr(args, "solo_año",  None) or CFG["solo_año"]
     solo_mes  = getattr(args, "solo_mes",  None) or None
