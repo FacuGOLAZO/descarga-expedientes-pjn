@@ -1061,6 +1061,18 @@ class PageExpedientes(BasePage):
     # ── Refrescar lista ───────────────────────────────────────────
 
     def refrescar(self):
+        try:
+            self._refrescar_impl()
+        except Exception as e:
+            try:
+                messagebox.showerror(
+                    "Error",
+                    f"No se pudo actualizar la lista de expedientes:\n{e}",
+                )
+            except Exception:
+                pass
+
+    def _refrescar_impl(self):
         # Limpiar todo excepto el toolbar (primer hijo)
         children = self._body.winfo_children()
         for w in children[1:]:   # saltar el toolbar
@@ -1743,42 +1755,49 @@ class App(tk.Tk):
         """Inserta texto en el log, manejando \\r para barras de progreso."""
         self._log.configure(state="normal")
 
-        # Dividir por \r y \n para manejar progress bars
-        for chunk in text.split("\r"):
-            if chunk == "":
-                continue
-            if "\n" in chunk:
-                self._log.insert("end", chunk)
-            else:
-                # Sobreescribir la última línea (comportamiento de \r)
-                idx = self._log.index("end-1c linestart")
-                self._log.delete(idx, "end")
-                self._log.insert("end", chunk)
+        try:
+            # Dividir por \r y \n para manejar progress bars
+            for chunk in text.split("\r"):
+                if chunk == "":
+                    continue
+                if "\n" in chunk:
+                    self._log.insert("end", chunk)
+                else:
+                    # Sobreescribir la última línea (comportamiento de \r)
+                    idx = self._log.index("end-1c linestart")
+                    self._log.delete(idx, "end")
+                    self._log.insert("end", chunk)
 
-        # Colorear según contenido
-        last_line = self._log.get("end-2l", "end")
-        tag = None
-        if any(w in last_line for w in ["✓", "OK", "completo", "✅"]):
-            tag = "ok"
-        elif any(w in last_line for w in ["ERROR", "Error", "❌", "FALLA"]):
-            tag = "err"
-        elif any(w in last_line for w in ["WARN", "⚠", "WARNING"]):
-            tag = "warn"
-        elif any(w in last_line for w in ["INFO", "iniciado", "Inicio"]):
-            tag = "info"
+            # Última línea visible (no usar "end-2l": con 1 sola línea Tcl revienta)
+            line_start = self._log.index("end-1c linestart")
+            last_line = self._log.get(line_start, "end-1c")
+            tag = None
+            if any(w in last_line for w in ["✓", "OK", "completo", "✅"]):
+                tag = "ok"
+            elif any(w in last_line for w in ["ERROR", "Error", "❌", "FALLA"]):
+                tag = "err"
+            elif any(w in last_line for w in ["WARN", "⚠", "WARNING"]):
+                tag = "warn"
+            elif any(w in last_line for w in ["INFO", "iniciado", "Inicio"]):
+                tag = "info"
 
-        if tag:
-            self._log.tag_add(tag, "end-2l", "end-1c")
-
-        self._log.see("end")
-        self._log.configure(state="disabled")
+            if tag:
+                self._log.tag_add(tag, line_start, "end-1c")
+        except tk.TclError:
+            pass
+        finally:
+            self._log.see("end")
+            self._log.configure(state="disabled")
 
     def _poll_queue(self):
         """Drena la cola de log cada 80 ms."""
         try:
             while True:
                 text = _log_queue.get_nowait()
-                self._append_log(text)
+                try:
+                    self._append_log(text)
+                except (tk.TclError, RuntimeError):
+                    pass
         except queue.Empty:
             pass
         self.after(80, self._poll_queue)
@@ -1812,7 +1831,11 @@ class App(tk.Tk):
             except SystemExit:
                 pass
             except Exception as exc:
-                _log_queue.put(f"\n❌ Error inesperado: {exc}\n")
+                import traceback as _tb
+
+                _log_queue.put(
+                    f"\n❌ Error inesperado: {exc}\n{_tb.format_exc()}\n"
+                )
             finally:
                 self.after(0, lambda: self._task_done(callback))
 
@@ -1820,10 +1843,22 @@ class App(tk.Tk):
 
     def _task_done(self, callback=None):
         self._task_running = False
-        self._progress.stop()
+        try:
+            self._progress.stop()
+        except tk.TclError:
+            pass
         self.set_status("✅  Listo.")
         if callback:
-            callback()
+            try:
+                callback()
+            except Exception as e:
+                try:
+                    messagebox.showerror(
+                        "Error al finalizar",
+                        f"La tarea terminó pero falló una acción posterior:\n\n{e}",
+                    )
+                except Exception:
+                    pass
 
     def set_status(self, msg: str):
         self._status_lbl.config(text=f"  {msg}")
