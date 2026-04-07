@@ -45,6 +45,19 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+# Bootstrap de importación:
+# Permite ejecutar `pjn_scw/cli.py` aun si el paquete no está instalado y el
+# directorio actual no es la raíz del repo (Windows: doble click / "Run Python File").
+# No afecta a PyInstaller (`sys.frozen`) ni a ejecuciones normales con `python -m ...`.
+if __name__ == "__main__" and not getattr(sys, "frozen", False):
+    try:
+        _pkg_dir = Path(__file__).resolve().parent  # .../pjn_scw
+        _repo_root = _pkg_dir.parent                # .../
+        if str(_repo_root) not in sys.path:
+            sys.path.insert(0, str(_repo_root))
+    except Exception:
+        pass
+
 # ── Imports opcionales (se verifican al usar) ─────────────────────────────────
 try:
     from pypdf import PdfReader, PdfWriter
