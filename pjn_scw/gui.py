@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Interfaz gráfica para SCW (Expedientes Judiciales PJN).
-Ejecutar desde la raíz del proyecto:  python -m pjn_scw.gui
+Ejecutar:  python -m pjn_scw.gui   o   python pjn_scw\\gui.py  (desde cualquier carpeta del repo).
 Requiere las mismas dependencias que la CLI (ver requirements.txt).
 """
 
@@ -15,6 +15,20 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 import configparser
+
+# Raíz del repo en sys.path antes de importar el paquete (GUI sin `python -m`).
+# Si se ejecuta `python pjn_scw\gui.py`, doble click o shortcut, sys.path[0] suele
+# ser solo `.../pjn_scw` y `import pjn_scw.cli` falla. PyInstaller no toca esto.
+if not getattr(sys, "frozen", False):
+    try:
+        _pkg_dir = Path(__file__).resolve().parent
+        _repo_root = _pkg_dir.parent
+        if _repo_root.is_dir() and (_repo_root / "pjn_scw").is_dir():
+            _rs = str(_repo_root)
+            if _rs not in sys.path:
+                sys.path.insert(0, _rs)
+    except Exception:
+        pass
 
 # ══════════════════════════════════════════════════════════════════
 #  CAPTURA DE STDOUT/LOGGING → COLA
@@ -1054,9 +1068,14 @@ class PageExpedientes(BasePage):
         self._cards.clear()
 
         if not _SCW_OK:
-            tk.Label(self._body, text="Módulo pjn_scw.cli no disponible",
-                     bg=C_CONTENT_BG, fg=C_TEXT_MUTED,
-                     font=FONT_UI).pack(pady=40)
+            tk.Label(
+                self._body,
+                text="Módulo pjn_scw.cli no disponible.\n"
+                      "Instalá dependencias (pip install -r requirements.txt)\n"
+                      "o ejecutá: python -m pjn_scw.gui desde la carpeta del proyecto.",
+                bg=C_CONTENT_BG, fg=C_TEXT_MUTED,
+                font=FONT_UI, justify="center",
+            ).pack(pady=40)
             return
 
         expedientes = scw.listar_expedientes()
@@ -1547,8 +1566,11 @@ class App(tk.Tk):
         if not _SCW_OK:
             messagebox.showerror(
                 "Error de importación",
-                "No se pudo importar pjn_scw.cli.\n"
-                "Ejecutá desde la raíz del proyecto (donde está la carpeta pjn_scw)."
+                "No se pudo importar pjn_scw.cli.\n\n"
+                "Comprobá que estés usando la copia completa del repositorio "
+                "(debe existir la carpeta pjn_scw junto a requirements.txt).\n"
+                "Instalá dependencias: pip install -r requirements.txt\n"
+                "Probá: python -m pjn_scw.gui"
             )
 
     # ─── Layout ───────────────────────────────────────────────────
@@ -1773,7 +1795,11 @@ class App(tk.Tk):
             return
 
         if not _SCW_OK:
-            messagebox.showerror("Error", "El módulo pjn_scw.cli no está disponible.")
+            messagebox.showerror(
+                "Error",
+                "El módulo pjn_scw.cli no está disponible.\n"
+                "Revisá requirements.txt y ejecutá: python -m pjn_scw.gui",
+            )
             return
 
         self._task_running = True
