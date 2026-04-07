@@ -546,46 +546,161 @@ def _construir_nombre(fila: dict, conteo: dict) -> str:
     return f"{base} ({conteo[base]})" if conteo[base] > 1 else base
 
 async def _extraer_filas(page) -> list:
-    # Mucho más rápido que hacer N round-trips (query_selector/inner_text) por fila.
+    # Un .btn-group por acciones ≈ un PDF; querySelector por fila solo tomaba el 1.er link.
     return await page.evaluate('''() => {
         const base = "https://scw.pjn.gov.ar";
-        const out = [];
-        const rows = document.querySelectorAll("#expediente\\\\:action-table tbody tr");
-        for (const row of rows) {
-            const a = row.querySelector('a[href*="download=true"]');
-            if (!a) continue;
-            let href = (a.getAttribute("href") || "").trim();
-            if (!href || !href.includes("viewer.seam")) continue;
-            if (href.startsWith("/")) href = base + href;
+        const tbody = document.querySelector("#expediente\\\\:action-table tbody");
+        if (!tbody) return [];
 
-            const fechaEl = row.querySelector("td:nth-child(3) span.font-color-black");
-            const tipoEl  = row.querySelector("td:nth-child(4) span.font-color-black");
-            const detEl   = row.querySelector("td:nth-child(5) span.font-color-black");
+        const metaFromTr = (tr) => {
+            const fechaEl = tr.querySelector("td:nth-child(3) span.font-color-black");
+            const tipoEl  = tr.querySelector("td:nth-child(4) span.font-color-black");
+            const detEl   = tr.querySelector("td:nth-child(5) span.font-color-black");
             const fecha   = (fechaEl?.innerText || "").trim();
             const tipo    = (tipoEl?.innerText  || "").trim();
-            if (!fecha || !tipo) continue;
             const detalle = (detEl?.innerText || "").trim();
+            return { fecha, tipo, detalle };
+        };
 
+        const findPdfA = (root) => {
+            return root.querySelector('a[href*="download=true"]')
+                || root.querySelector('a[href*="viewer.seam"]');
+        };
+
+        const pushIfPdf = (out, tr, a) => {
+            if (!a) return;
+            let href = (a.getAttribute("href") || "").trim();
+            if (!href || !href.includes("viewer.seam")) return;
+            if (href.startsWith("/")) href = base + href;
+            const { fecha, tipo, detalle } = metaFromTr(tr);
+            if (!fecha || !tipo) return;
             out.push({ fecha, tipo, detalle, url: href });
+        };
+
+        const out = [];
+        const groups = tbody.querySelectorAll(".btn-group");
+        if (groups.length > 0) {
+            for (const bg of groups) {
+                const tr = bg.closest("tr");
+                if (!tr) continue;
+                pushIfPdf(out, tr, findPdfA(bg));
+            }
+        } else {
+            for (const row of tbody.querySelectorAll("tr")) {
+                pushIfPdf(out, row, findPdfA(row));
+            }
         }
         return out;
     }''')
+
+
+async def _auditar_btn_group_vs_extraccion(page, n_extr: int, label: str) -> None:
+    """Compara cantidad de enlaces PDF vía .btn-group (o filas) con lo extraído."""
+    try:
+        data = await page.evaluate('''() => {
+            const tbody = document.querySelector(
+                "#expediente\\\\:action-table tbody"
+            );
+            if (!tbody) return null;
+            const groups = tbody.querySelectorAll(".btn-group");
+            const metaOk = (tr) => {
+                if (!tr) return false;
+                const fechaEl = tr.querySelector(
+                    "td:nth-child(3) span.font-color-black"
+                );
+                const tipoEl = tr.querySelector(
+                    "td:nth-child(4) span.font-color-black"
+                );
+                const f = (fechaEl?.innerText || "").trim();
+                const t = (tipoEl?.innerText || "").trim();
+                return !!(f && t);
+            };
+            let linksPdf = 0;
+            let conMeta = 0;
+            const pickA = (root) =>
+                root.querySelector('a[href*="download=true"]')
+                || root.querySelector('a[href*="viewer.seam"]');
+            if (groups.length > 0) {
+                for (const bg of groups) {
+                    const a = pickA(bg);
+                    const h = a ? (a.getAttribute("href") || "").trim() : "";
+                    if (!h || !h.includes("viewer.seam")) continue;
+                    linksPdf++;
+                    const tr = bg.closest("tr");
+                    if (metaOk(tr)) conMeta++;
+                }
+                return {
+                    modo: "btn-group",
+                    linksPdf,
+                    conMeta,
+                    grupos: groups.length,
+                };
+            }
+            for (const row of tbody.querySelectorAll("tr")) {
+                const a = pickA(row);
+                const h = a ? (a.getAttribute("href") || "").trim() : "";
+                if (!h || !h.includes("viewer.seam")) continue;
+                linksPdf++;
+                if (metaOk(row)) conMeta++;
+            }
+            return { modo: "tr", linksPdf, conMeta, grupos: 0 };
+        }''')
+    except Exception:
+        return
+    if not data:
+        return
+    modo = data.get("modo", "")
+    links_pdf = int(data.get("linksPdf", 0))
+    con_meta = int(data.get("conMeta", 0))
+    if links_pdf != n_extr:
+        log.warning(
+            "Página %s: en DOM hay %d enlace(s) PDF (%s); "
+            "se extrajeron %d fila(s). Con fecha+tipo: %d.",
+            label,
+            links_pdf,
+            modo,
+            n_extr,
+            con_meta,
+        )
+
 
 async def _firma_vista_tabla(page) -> str:
     """Identifica la vista actual de la tabla + página activa (anti-bucle en paginación)."""
     try:
         return await page.evaluate('''() => {
-            const rows = document.querySelectorAll(
-                "#expediente\\\\:action-table tbody tr"
-            );
-            const n = rows.length;
-            const hrefOf = (tr) => {
-                if (!tr) return "";
-                const a = tr.querySelector('a[href*="download=true"]');
-                return a ? (a.getAttribute("href") || "").trim() : "";
+            const hrefsEnOrden = () => {
+                const base = "https://scw.pjn.gov.ar";
+                const tbody = document.querySelector(
+                    "#expediente\\\\:action-table tbody"
+                );
+                if (!tbody) return [];
+                const acc = [];
+                const pickA = (root) =>
+                    root.querySelector('a[href*="download=true"]')
+                    || root.querySelector('a[href*="viewer.seam"]');
+                const push = (a) => {
+                    if (!a) return;
+                    let h = (a.getAttribute("href") || "").trim();
+                    if (!h || !h.includes("viewer.seam")) return;
+                    if (h.startsWith("/")) h = base + h;
+                    acc.push(h);
+                };
+                const groups = tbody.querySelectorAll(".btn-group");
+                if (groups.length > 0) {
+                    for (const bg of groups) {
+                        push(pickA(bg));
+                    }
+                } else {
+                    for (const row of tbody.querySelectorAll("tr")) {
+                        push(pickA(row));
+                    }
+                }
+                return acc;
             };
-            const first = hrefOf(rows[0]);
-            const last = hrefOf(rows[n - 1]);
+            const hrefs = hrefsEnOrden();
+            const n = hrefs.length;
+            const first = n ? hrefs[0] : "";
+            const last = n ? hrefs[n - 1] : "";
             const li = document.querySelector(
                 '[id$=":divPagesAct"] li.active span:last-child'
             );
@@ -598,6 +713,7 @@ async def _firma_vista_tabla(page) -> str:
 async def _snapshot_paginacion(page) -> dict:
     """Estado observable antes/después del click en Siguiente (varios criterios)."""
     return await page.evaluate('''() => {
+        const base = "https://scw.pjn.gov.ar";
         const td = document.querySelector(
             "#expediente\\\\:action-table tbody tr:first-child td:nth-child(3)"
         );
@@ -606,12 +722,37 @@ async def _snapshot_paginacion(page) -> dict:
             '[id$=":divPagesAct"] li.active span:last-child'
         );
         const pag = li ? li.innerText.trim() : "?";
-        const row = document.querySelector("#expediente\\\\:action-table tbody tr");
-        const a = row ? row.querySelector('a[href*="download=true"]') : null;
-        const href = a ? (a.getAttribute("href") || "").trim() : "";
-        const n = document.querySelectorAll(
-            "#expediente\\\\:action-table tbody tr"
-        ).length;
+        const tbody = document.querySelector("#expediente\\\\:action-table tbody");
+        let href = "";
+        let n = 0;
+        if (tbody) {
+            const groups = tbody.querySelectorAll(".btn-group");
+            const hrefs = [];
+            const pickA = (root) =>
+                root.querySelector('a[href*="download=true"]')
+                || root.querySelector('a[href*="viewer.seam"]');
+            if (groups.length > 0) {
+                for (const bg of groups) {
+                    const a = pickA(bg);
+                    if (!a) continue;
+                    let h = (a.getAttribute("href") || "").trim();
+                    if (!h || !h.includes("viewer.seam")) continue;
+                    if (h.startsWith("/")) h = base + h;
+                    hrefs.push(h);
+                }
+            } else {
+                for (const row of tbody.querySelectorAll("tr")) {
+                    const a = pickA(row);
+                    if (!a) continue;
+                    let h = (a.getAttribute("href") || "").trim();
+                    if (!h || !h.includes("viewer.seam")) continue;
+                    if (h.startsWith("/")) h = base + h;
+                    hrefs.push(h);
+                }
+            }
+            n = hrefs.length;
+            href = hrefs.length ? hrefs[0] : "";
+        }
         return { fecha, pag, href, n };
     }''')
 
@@ -632,6 +773,7 @@ async def _ir_siguiente_pagina(page, timeout_ajax: int) -> bool:
     try:
         await page.wait_for_function(
             f'''() => {{
+                const base = "https://scw.pjn.gov.ar";
                 const td = document.querySelector(
                     "#expediente\\\\:action-table tbody tr:first-child td:nth-child(3)"
                 );
@@ -640,14 +782,39 @@ async def _ir_siguiente_pagina(page, timeout_ajax: int) -> bool:
                     '[id$=":divPagesAct"] li.active span:last-child'
                 );
                 const pagNow = li ? li.innerText.trim() : "?";
-                const row = document.querySelector(
-                    "#expediente\\\\:action-table tbody tr"
+                const tbody = document.querySelector(
+                    "#expediente\\\\:action-table tbody"
                 );
-                const a = row ? row.querySelector('a[href*="download=true"]') : null;
-                const hrefNow = a ? (a.getAttribute("href") || "").trim() : "";
-                const n = document.querySelectorAll(
-                    "#expediente\\\\:action-table tbody tr"
-                ).length;
+                let hrefNow = "";
+                let n = 0;
+                if (tbody) {{
+                    const hrefs = [];
+                    const pickA = (root) =>
+                        root.querySelector('a[href*="download=true"]')
+                        || root.querySelector('a[href*="viewer.seam"]');
+                    const groups = tbody.querySelectorAll(".btn-group");
+                    if (groups.length > 0) {{
+                        for (const bg of groups) {{
+                            const a = pickA(bg);
+                            if (!a) continue;
+                            let h = (a.getAttribute("href") || "").trim();
+                            if (!h || !h.includes("viewer.seam")) continue;
+                            if (h.startsWith("/")) h = base + h;
+                            hrefs.push(h);
+                        }}
+                    }} else {{
+                        for (const row of tbody.querySelectorAll("tr")) {{
+                            const a = pickA(row);
+                            if (!a) continue;
+                            let h = (a.getAttribute("href") || "").trim();
+                            if (!h || !h.includes("viewer.seam")) continue;
+                            if (h.startsWith("/")) h = base + h;
+                            hrefs.push(h);
+                        }}
+                    }}
+                    n = hrefs.length;
+                    hrefNow = hrefs.length ? hrefs[0] : "";
+                }}
                 return fechaNow !== {json.dumps(snap_antes["fecha"])}
                     || pagNow !== {json.dumps(snap_antes["pag"])}
                     || hrefNow !== {json.dumps(snap_antes["href"])}
@@ -892,6 +1059,7 @@ async def _run_descargar(args):
             )
             print(f"  {linea_pag}")
             log.info("Scraping %s", linea_pag.strip())
+            await _auditar_btn_group_vs_extraccion(page, len(filas), label)
             hay_sig = await _ir_siguiente_pagina(page, CFG["timeout_ajax"])
             if not hay_sig:
                 print(f"\n  Scraping completo: {len(todas_las_filas)} PDFs encontrados\n")
