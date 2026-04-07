@@ -128,6 +128,7 @@ CFG = {
     "timeout_tabla":     _ci("descarga", "timeout_tabla",     120),
     "timeout_ajax":      _ci("descarga", "timeout_ajax",      30),
     "reintentos":        _ci("descarga", "reintentos",        3),
+    "max_paginas_scraping": _ci("descarga", "max_paginas_scraping", 500),
     # union
     "archivo_unificado": Path(_cs("union", "archivo_salida",  "expediente_unificado.pdf")),
     "calidad":           _cs("union", "calidad",              "ebook"),
@@ -570,6 +571,30 @@ async def _extraer_filas(page) -> list:
         return out;
     }''')
 
+async def _firma_vista_tabla(page) -> str:
+    """Identifica la vista actual de la tabla + página activa (anti-bucle en paginación)."""
+    try:
+        return await page.evaluate('''() => {
+            const rows = document.querySelectorAll(
+                "#expediente\\\\:action-table tbody tr"
+            );
+            const n = rows.length;
+            const hrefOf = (tr) => {
+                if (!tr) return "";
+                const a = tr.querySelector('a[href*="download=true"]');
+                return a ? (a.getAttribute("href") || "").trim() : "";
+            };
+            const first = hrefOf(rows[0]);
+            const last = hrefOf(rows[n - 1]);
+            const li = document.querySelector(
+                '[id$=":divPagesAct"] li.active span:last-child'
+            );
+            const pag = li ? li.innerText.trim() : "?";
+            return [n, pag, first, last].join("|");
+        }''')
+    except Exception:
+        return ""
+
 async def _ir_siguiente_pagina(page, timeout_ajax: int) -> bool:
     siguiente = await page.query_selector('[id$=":divPagesAct"] span[title="Siguiente"]')
     if not siguiente:
@@ -577,6 +602,7 @@ async def _ir_siguiente_pagina(page, timeout_ajax: int) -> bool:
     padre = await siguiente.evaluate_handle('el => el.parentElement')
     if (await padre.evaluate('el => el.tagName')).upper() != 'A':
         return False
+    firma_antes = await _firma_vista_tabla(page)
     primera_antes = await page.evaluate('''() => {
         const td = document.querySelector(
             "#expediente\\\\:action-table tbody tr:first-child td:nth-child(3)"
@@ -597,10 +623,24 @@ async def _ir_siguiente_pagina(page, timeout_ajax: int) -> bool:
         )
         cambio_detectado = True
     except PWTimeout:
-        pass
+        log.warning(
+            "Paginación: sin cambio visible en la 1.ª fila tras %ds; "
+            "comprobando si la tabla avanzó.",
+            timeout_ajax,
+        )
     # Si detectamos el cambio por AJAX no hace falta esperar un "sleep" fijo.
     if not cambio_detectado and CFG["pausa_pagina"] > 0:
         await asyncio.sleep(CFG["pausa_pagina"])
+    firma_despues = await _firma_vista_tabla(page)
+    # Si el enlace "Siguiente" sigue activo pero la vista no cambió, antes
+    # devolvíamos True y el bucle podía colgarse o repetir la misma página.
+    if firma_despues and firma_despues == firma_antes:
+        log.warning(
+            "Paginación: la tabla no cambió tras 'Siguiente'; se detiene el scraping."
+        )
+        return False
+    if not cambio_detectado and firma_despues != firma_antes:
+        log.info("Paginación: avance detectado por firma de tabla (sin cambio en 1.ª celda).")
     return True
 
 async def _obtener_pagina_actual(page) -> int:
@@ -824,6 +864,17 @@ async def _run_descargar(args):
                     "Scraping terminado: %d página(s) visitada(s), %d documento(s) en lista.",
                     paginas_recorridas,
                     len(todas_las_filas),
+                )
+                break
+            if paginas_recorridas >= CFG["max_paginas_scraping"]:
+                log.warning(
+                    "Scraping detenido: límite max_paginas_scraping (%d) — "
+                    "subilo en [descarga] si el expediente es muy largo.",
+                    CFG["max_paginas_scraping"],
+                )
+                print(
+                    f"\n  ⚠  Límite de páginas ({CFG['max_paginas_scraping']}) alcanzado; "
+                    f"{len(todas_las_filas)} PDFs en lista.\n"
                 )
                 break
             pagina += 1
