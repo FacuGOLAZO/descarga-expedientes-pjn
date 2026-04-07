@@ -710,6 +710,8 @@ async def _run_descargar(args):
         print(f"  Rango   : {desde_raw or '...'} → {hasta_raw or '...'}")
     print(f"  Paralel.: {concurr}  |  Reintentos: {reintentos}\n")
     log.info("Descarga iniciada — URL: %s", url)
+    if dry_run:
+        log.info("Modo dry-run: tras el scraping se simularán las descargas (sin escribir PDFs).")
 
     todas_las_filas: list = []
     cookies_playwright: list = []
@@ -799,6 +801,8 @@ async def _run_descargar(args):
 
         conteo_nombres: dict = {}
         pagina = 1
+        paginas_recorridas = 0
+        log.info("Scraping: recorriendo tabla de documentos (paginación)...")
         while True:
             pag_actual = await _obtener_pagina_actual(page)
             label      = str(pag_actual) if pag_actual > 0 else str(pagina)
@@ -806,11 +810,21 @@ async def _run_descargar(args):
             for fila in filas:
                 fila['nombre'] = _construir_nombre(fila, conteo_nombres)
             todas_las_filas.extend(filas)
-            print(f"  Pág. {label:>4} | {len(filas):>3} PDFs | "
-                  f"acumulado: {len(todas_las_filas)}")
+            paginas_recorridas += 1
+            linea_pag = (
+                f"Pág. {label:>4} | {len(filas):>3} PDFs en esta página | "
+                f"acumulado: {len(todas_las_filas)}"
+            )
+            print(f"  {linea_pag}")
+            log.info("Scraping %s", linea_pag.strip())
             hay_sig = await _ir_siguiente_pagina(page, CFG["timeout_ajax"])
             if not hay_sig:
                 print(f"\n  Scraping completo: {len(todas_las_filas)} PDFs encontrados\n")
+                log.info(
+                    "Scraping terminado: %d página(s) visitada(s), %d documento(s) en lista.",
+                    paginas_recorridas,
+                    len(todas_las_filas),
+                )
                 break
             pagina += 1
 
@@ -821,7 +835,11 @@ async def _run_descargar(args):
         log.warning("No se encontraron PDFs.")
         return
 
-    log.info("Scraping completo: %d PDFs — %s", len(todas_las_filas), nombre_expediente)
+    log.info(
+        "Lista de documentos lista: %d ítem(s) — expediente: %s",
+        len(todas_las_filas),
+        nombre_expediente,
+    )
 
     # Filtrar por rango de fechas si se especificó
     if desde_iso or hasta_iso:
@@ -904,6 +922,11 @@ async def _run_descargar(args):
     }
 
     print(f"  Descargando {len(todas_las_filas)} PDFs ({concurr} simultáneos)...\n")
+    if dry_run:
+        log.info(
+            "Dry-run: simulando %d descarga(s) en paralelo (la barra de progreso no se duplica en el log).",
+            len(todas_las_filas),
+        )
 
     headers = {
         'User-Agent': (
@@ -942,8 +965,26 @@ async def _run_descargar(args):
     mins, segs = divmod(int(elapsed), 60)
     print()
 
-    log.info("Descarga completa — OK:%d  Omitidos:%d  Errores:%d  Tiempo:%dm%ds",
-             contador['ok'], contador['omitidos'], contador['errores'], mins, segs)
+    if dry_run:
+        log.info(
+            "Dry-run finalizado — simulados:%d  OK:%d  Omitidos:%d  Errores:%d  Tiempo:%dm%ds "
+            "(los PDFs ya estaban en la lista del scraping; revisá las líneas “Scraping Pág.” arriba).",
+            contador["dry"],
+            contador["ok"],
+            contador["omitidos"],
+            contador["errores"],
+            mins,
+            segs,
+        )
+    else:
+        log.info(
+            "Descarga completa — OK:%d  Omitidos:%d  Errores:%d  Tiempo:%dm%ds",
+            contador["ok"],
+            contador["omitidos"],
+            contador["errores"],
+            mins,
+            segs,
+        )
 
     print(f"\n{'─'*58}")
     print(f"  ✓  Descargados : {contador['ok']}")
