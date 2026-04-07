@@ -597,9 +597,12 @@ async def _extraer_filas(page) -> list:
         if (!tbody) return [];
 
         const metaFromTr = (tr) => {
-            const fechaEl = tr.querySelector("td:nth-child(3) span.font-color-black");
-            const tipoEl  = tr.querySelector("td:nth-child(4) span.font-color-black");
-            const detEl   = tr.querySelector("td:nth-child(5) span.font-color-black");
+            const tdFecha = tr.querySelector("td:nth-child(3)");
+            const tdTipo  = tr.querySelector("td:nth-child(4)");
+            const tdDet   = tr.querySelector("td:nth-child(5)");
+            const fechaEl = tdFecha?.querySelector("span.font-color-black") || tdFecha;
+            const tipoEl  = tdTipo?.querySelector("span.font-color-black")  || tdTipo;
+            const detEl   = tdDet?.querySelector("span.font-color-black")   || tdDet;
             const fecha   = (fechaEl?.innerText || "").trim();
             const tipo    = (tipoEl?.innerText  || "").trim();
             const detalle = (detEl?.innerText || "").trim();
@@ -617,7 +620,7 @@ async def _extraer_filas(page) -> list:
             if (!href || !href.includes("viewer.seam")) return;
             if (href.startsWith("/")) href = base + href;
             const { fecha, tipo, detalle } = metaFromTr(tr);
-            if (!fecha || !tipo) return;
+            // No filtrar por fecha/tipo: algunas páginas tardan en poblar esas celdas.
             out.push({ fecha, tipo, detalle, url: href });
         };
 
@@ -649,12 +652,10 @@ async def _auditar_btn_group_vs_extraccion(page, n_extr: int, label: str) -> Non
             const groups = tbody.querySelectorAll(".btn-group");
             const metaOk = (tr) => {
                 if (!tr) return false;
-                const fechaEl = tr.querySelector(
-                    "td:nth-child(3) span.font-color-black"
-                );
-                const tipoEl = tr.querySelector(
-                    "td:nth-child(4) span.font-color-black"
-                );
+                const tdFecha = tr.querySelector("td:nth-child(3)");
+                const tdTipo  = tr.querySelector("td:nth-child(4)");
+                const fechaEl = tdFecha?.querySelector("span.font-color-black") || tdFecha;
+                const tipoEl  = tdTipo?.querySelector("span.font-color-black")  || tdTipo;
                 const f = (fechaEl?.innerText || "").trim();
                 const t = (tipoEl?.innerText || "").trim();
                 return !!(f && t);
@@ -1088,11 +1089,21 @@ async def _run_descargar(args):
         conteo_nombres: dict = {}
         pagina = 1
         paginas_recorridas = 0
+        ultima_fecha_conocida: str | None = None
         log.info("Scraping: recorriendo tabla de documentos (paginación)...")
         while True:
             pag_actual = await _obtener_pagina_actual(page)
             label      = str(pag_actual) if pag_actual > 0 else str(pagina)
             filas      = await _extraer_filas(page)
+            # Si faltan fechas, usar la última fecha conocida (mantiene el orden).
+            for fila in filas:
+                f = (fila.get("fecha") or "").strip()
+                if f:
+                    ultima_fecha_conocida = f
+                else:
+                    fila["fecha"] = ultima_fecha_conocida or "sin_fecha"
+                if not (fila.get("tipo") or "").strip():
+                    fila["tipo"] = "SIN_TIPO"
             for fila in filas:
                 fila['nombre'] = _construir_nombre(fila, conteo_nombres)
             todas_las_filas.extend(filas)
