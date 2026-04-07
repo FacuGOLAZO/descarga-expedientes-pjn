@@ -532,29 +532,30 @@ def _construir_nombre(fila: dict, conteo: dict) -> str:
     return f"{base} ({conteo[base]})" if conteo[base] > 1 else base
 
 async def _extraer_filas(page) -> list:
-    filas = []
-    rows  = await page.query_selector_all('#expediente\\:action-table tbody tr')
-    for row in rows:
-        link_el = await row.query_selector('a[href*="download=true"]')
-        if not link_el:
-            continue
-        fecha_el = await row.query_selector('td:nth-child(3) span.font-color-black')
-        tipo_el  = await row.query_selector('td:nth-child(4) span.font-color-black')
-        det_el   = await row.query_selector('td:nth-child(5) span.font-color-black')
-        if not (fecha_el and tipo_el):
-            continue
-        url_dl = await link_el.get_attribute('href')
-        if not url_dl or 'viewer.seam' not in url_dl:
-            continue
-        if url_dl.startswith('/'):
-            url_dl = 'https://scw.pjn.gov.ar' + url_dl
-        filas.append({
-            'fecha':   (await fecha_el.inner_text()).strip(),
-            'tipo':    (await tipo_el.inner_text()).strip(),
-            'detalle': ((await det_el.inner_text()).strip() if det_el else ''),
-            'url':     url_dl,
-        })
-    return filas
+    # Mucho más rápido que hacer N round-trips (query_selector/inner_text) por fila.
+    return await page.evaluate('''() => {
+        const base = "https://scw.pjn.gov.ar";
+        const out = [];
+        const rows = document.querySelectorAll("#expediente\\\\:action-table tbody tr");
+        for (const row of rows) {
+            const a = row.querySelector('a[href*="download=true"]');
+            if (!a) continue;
+            let href = (a.getAttribute("href") || "").trim();
+            if (!href || !href.includes("viewer.seam")) continue;
+            if (href.startsWith("/")) href = base + href;
+
+            const fechaEl = row.querySelector("td:nth-child(3) span.font-color-black");
+            const tipoEl  = row.querySelector("td:nth-child(4) span.font-color-black");
+            const detEl   = row.querySelector("td:nth-child(5) span.font-color-black");
+            const fecha   = (fechaEl?.innerText || "").trim();
+            const tipo    = (tipoEl?.innerText  || "").trim();
+            if (!fecha || !tipo) continue;
+            const detalle = (detEl?.innerText || "").trim();
+
+            out.push({ fecha, tipo, detalle, url: href });
+        }
+        return out;
+    }''')
 
 async def _ir_siguiente_pagina(page, timeout_ajax: int) -> bool:
     siguiente = await page.query_selector('[id$=":divPagesAct"] span[title="Siguiente"]')
@@ -570,6 +571,7 @@ async def _ir_siguiente_pagina(page, timeout_ajax: int) -> bool:
         return td ? td.innerText.trim() : "";
     }''')
     await padre.as_element().click()
+    cambio_detectado = False
     try:
         await page.wait_for_function(
             f'''() => {{
@@ -580,9 +582,12 @@ async def _ir_siguiente_pagina(page, timeout_ajax: int) -> bool:
             }}''',
             timeout=timeout_ajax * 1000,
         )
+        cambio_detectado = True
     except PWTimeout:
         pass
-    await asyncio.sleep(CFG["pausa_pagina"])
+    # Si detectamos el cambio por AJAX no hace falta esperar un "sleep" fijo.
+    if not cambio_detectado and CFG["pausa_pagina"] > 0:
+        await asyncio.sleep(CFG["pausa_pagina"])
     return True
 
 async def _obtener_pagina_actual(page) -> int:
@@ -598,7 +603,7 @@ async def _obtener_pagina_actual(page) -> int:
         return -1
 
 async def _descargar_un_pdf(semaforo, contador, lock, fila, ruta_pdf,
-                             cookies_jar, reintentos, dry_run, registro_docs):
+                             client, reintentos, dry_run, registro_docs):
     nombre = ruta_pdf.stem
 
     if ruta_pdf.exists():
@@ -619,27 +624,15 @@ async def _descargar_un_pdf(semaforo, contador, lock, fila, ruta_pdf,
                   f"  DRY-RUN {nombre[:55]}", end="\r")
         return
 
-    headers = {
-        'User-Agent': (
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-            'AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
-        ),
-        'Referer': 'https://scw.pjn.gov.ar/',
-    }
-
     async with semaforo:
         for intento in range(1, reintentos + 1):
             try:
-                async with httpx.AsyncClient(
-                    cookies=cookies_jar, headers=headers,
-                    follow_redirects=True, timeout=60,
-                ) as client:
-                    r = await client.get(fila['url'])
-                    r.raise_for_status()
-                    ct = r.headers.get('content-type', '')
-                    if 'pdf' not in ct and len(r.content) < 100:
-                        raise ValueError(f"Respuesta inesperada: {ct}")
-                    ruta_pdf.write_bytes(r.content)
+                r = await client.get(fila['url'])
+                r.raise_for_status()
+                ct = r.headers.get('content-type', '')
+                if 'pdf' not in ct and len(r.content) < 100:
+                    raise ValueError(f"Respuesta inesperada: {ct}")
+                ruta_pdf.write_bytes(r.content)
 
                 async with lock:
                     contador["ok"] += 1
@@ -899,16 +892,34 @@ async def _run_descargar(args):
 
     print(f"  Descargando {len(todas_las_filas)} PDFs ({concurr} simultáneos)...\n")
 
-    tareas = [
-        _descargar_un_pdf(
-            semaforo, contador, lock, fila,
-            carpeta / f"{fila['nombre']}.pdf",
-            cookies_jar, reintentos, dry_run,
-            docs_registro,
-        )
-        for fila in todas_las_filas
-    ]
-    await asyncio.gather(*tareas)
+    headers = {
+        'User-Agent': (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            'AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
+        ),
+        'Referer': 'https://scw.pjn.gov.ar/',
+    }
+    limits = httpx.Limits(
+        max_connections=max(10, concurr * 2),
+        max_keepalive_connections=max(5, concurr),
+    )
+    async with httpx.AsyncClient(
+        cookies=cookies_jar,
+        headers=headers,
+        follow_redirects=True,
+        timeout=60,
+        limits=limits,
+    ) as client:
+        tareas = [
+            _descargar_un_pdf(
+                semaforo, contador, lock, fila,
+                carpeta / f"{fila['nombre']}.pdf",
+                client, reintentos, dry_run,
+                docs_registro,
+            )
+            for fila in todas_las_filas
+        ]
+        await asyncio.gather(*tareas)
 
     # Guardar registro actualizado con estados de descarga
     if not dry_run:
