@@ -372,54 +372,52 @@ _TT = {
         ]
     ),
     "sin_comprimir": (
-        "Sin comprimir",
+        "Sin comprimir (flujo completo)",
         [
-            "Omite la compresión con Ghostscript y une los PDFs\ntal como están.",
-            "Usá esta opción si:\n• Ghostscript no está instalado\n• Los PDFs ya están comprimidos\n• Querés una unión rápida sin perder calidad",
-            "El archivo final va a ser más grande.",
-        ]
-    ),
-    "max_mb": (
-        "Tamaño máximo por archivo (MB)",
-        [
-            "Al dividir el expediente por año, si un año tiene\nmuchos documentos, el PDF resultante puede ser enorme.",
-            "Con este límite, si un año supera el tamaño indicado,\nse divide automáticamente en partes: 2022_parte1, 2022_parte2, etc.",
-            "40 MB es un buen valor para poder adjuntar en\ncorreos electrónicos o sistemas judiciales.",
-        ]
-    ),
-    "solo_año": (
-        "Filtrar por año",
-        [
-            "Si lo dejás vacío, se exportan todos los años\ndetectados en el expediente.",
-            "Si escribís un año (ej: 2023), solo se genera\nel PDF de ese año.",
-            "Útil si solo necesitás un período específico\nsin procesar todo el expediente.",
+            "En 'Flujo completo', omite el paso Comprimir y pasa\ndirecto a Unir.",
+            "Usalo si Ghostscript no está instalado, si los PDFs\nya están comprimidos, o si querés unir sin tocar los archivos.",
         ]
     ),
     "desde_hasta": (
         "Rango de fechas",
         [
-            "Filtra los documentos por fecha.",
             "Formato: DD/MM/AAAA  (ej: 15/03/2021)",
-            "Podés dejar uno vacío:\n• Solo 'Desde' → todos desde esa fecha en adelante\n• Solo 'Hasta' → todos hasta esa fecha\n• Ambos vacíos → sin filtro, se procesan todos",
-            "Para descargar: filtra qué documentos descarga.\nPara dividir: filtra qué períodos genera.",
-        ]
-    ),
-    "solo_mes": (
-        "Filtrar por mes",
-        [
-            "Si lo dejás vacío, se exportan todos los meses detectados.",
-            "Si escribís un mes en formato AAAA-MM (ej: 2023-05),\nsolo se genera el PDF de ese mes.",
-            "Útil para buscar documentos de un período específico.",
-        ]
-    ),
-    "modo_division": (
-        "Modo de división",
-        [
-            ("año", "",  "Un PDF por cada año del expediente.\nEj: expediente_2021.pdf, expediente_2022.pdf\nIdeal para expedientes con pocos documentos por año."),
-            ("mes", "",  "Un PDF por cada mes del expediente.\nEj: expediente_2023-01.pdf, expediente_2023-02.pdf\nIdeal cuando un año tiene demasiados documentos."),
+            "Podés dejar uno vacío:\n• Solo 'Desde' → todos desde esa fecha en adelante\n• Solo 'Hasta' → todos hasta esa fecha\n• Ambos vacíos → sin filtro",
+            "En descarga: filtra qué PDFs se bajan del sitio.",
+            "En unir: filtra por la fecha del documento (primer tramo del nombre\ndel archivo, el que genera la descarga SCW). Los que no tengan fecha\nreconocible se omiten si hay filtro activo.",
+            "El botón 📅 abre un calendario (requiere pip install tkcalendar).",
         ]
     ),
 }
+
+
+def _open_calendar_dialog(parent: tk.Widget, var: tk.StringVar) -> None:
+    """Abre un calendario (tkcalendar) y escribe la fecha en var como DD/MM/AAAA."""
+    try:
+        from tkcalendar import Calendar
+    except ImportError:
+        messagebox.showinfo(
+            "Calendario",
+            "Para el selector gráfico instalá:\n  pip install tkcalendar\n\n"
+            "Podés escribir la fecha a mano en formato DD/MM/AAAA.",
+        )
+        return
+
+    top = tk.Toplevel(parent.winfo_toplevel())
+    top.title("Elegir fecha")
+    top.transient(parent.winfo_toplevel())
+    cal = Calendar(top, selectmode="day", date_pattern="dd/mm/y")
+    cal.pack(padx=10, pady=10)
+
+    def _ok():
+        d = cal.selection_get()
+        var.set(f"{d.day:02d}/{d.month:02d}/{d.year}")
+        top.destroy()
+
+    bf = tk.Frame(top)
+    bf.pack(pady=(0, 10))
+    _btn(bf, "Aceptar", _ok, style="accent").pack(side="left", padx=4)
+    _btn(bf, "Cancelar", top.destroy, style="ghost").pack(side="left", padx=4)
 
 
 def _question_btn(parent, row: int, col: int, tip_key: str) -> tk.Label:
@@ -528,18 +526,40 @@ class BasePage(tk.Frame):
         return card
 
     def _build_date_range(self, card: tk.Frame,
-                          row_desde: int = 0, row_hasta: int = 1):
+                          row_desde: int = 0, row_hasta: int = 1,
+                          *,
+                          with_calendar: bool = False,
+                          desde_default: str = "",
+                          hasta_default: str = "",
+                          nota: str | None = None):
         """Campos Desde / Hasta. Guarda en self.v_desde / self.v_hasta."""
-        self.v_desde = _make_field(card, row_desde, "Desde (DD/MM/AAAA)", "", width=14)
+        nota = nota or (
+            "Dejá ambos vacíos para procesar todos los documentos."
+        )
+        self.v_desde = _make_field(
+            card, row_desde, "Desde (DD/MM/AAAA)", desde_default, width=14)
         _question_btn(card, row_desde, 2, "desde_hasta")
+        if with_calendar:
+            tk.Button(
+                card, text="📅", command=lambda: _open_calendar_dialog(self, self.v_desde),
+                bg=C_WHITE, relief="flat", bd=0, font=("Segoe UI", 10),
+                cursor="hand2", activebackground=C_ACCENT_LIGHT,
+            ).grid(row=row_desde, column=3, padx=(4, 0), pady=4)
 
-        self.v_hasta = _make_field(card, row_hasta, "Hasta (DD/MM/AAAA)", "", width=14)
+        self.v_hasta = _make_field(
+            card, row_hasta, "Hasta (DD/MM/AAAA)", hasta_default, width=14)
         _question_btn(card, row_hasta, 2, "desde_hasta")
+        if with_calendar:
+            tk.Button(
+                card, text="📅", command=lambda: _open_calendar_dialog(self, self.v_hasta),
+                bg=C_WHITE, relief="flat", bd=0, font=("Segoe UI", 10),
+                cursor="hand2", activebackground=C_ACCENT_LIGHT,
+            ).grid(row=row_hasta, column=3, padx=(4, 0), pady=4)
 
         tk.Label(card,
-                 text="Dejá ambos vacíos para procesar todos los documentos.",
+                 text=nota,
                  font=("Segoe UI", 7), bg=C_WHITE, fg=C_TEXT_MUTED).grid(
-                     row=row_hasta + 1, column=0, columnspan=3,
+                     row=row_hasta + 1, column=0, columnspan=4,
                      sticky="w", pady=(0, 2))
 
     def _build_actions(self, buttons: list):
@@ -717,6 +737,127 @@ class PageDescargar(BasePage):
         self.app.run_task(scw.cmd_descargar, Args())
 
 
+def _pack_ghostscript_banner(parent):
+    """Banner: Ghostscript instalado o no (compresión)."""
+    import shutil as _sh
+
+    gs_cmd = None
+    for nombre in ["gswin64c", "gswin32c", "gs", "gsc"]:
+        if _sh.which(nombre):
+            gs_cmd = nombre
+            break
+
+    version = ""
+    if gs_cmd:
+        try:
+            import subprocess as _sp
+            r = _sp.run([gs_cmd, "--version"],
+                        capture_output=True, text=True, timeout=5)
+            version = r.stdout.strip()
+        except Exception:
+            version = "instalado"
+
+    outer = tk.Frame(parent, bg=C_CONTENT_BG)
+    outer.pack(fill="x", padx=14, pady=(8, 0))
+
+    if gs_cmd:
+        bg_c, fg_c, dot_c = "#e6f4ea", "#1a7f37", "#2da44e"
+        icon, l1 = "✔", f"Ghostscript  {version}"
+        l2 = f"Compresión disponible  ·  ejecutable: {gs_cmd}"
+    else:
+        bg_c, fg_c, dot_c = "#fff8e6", "#7d4e00", "#e3b341"
+        icon, l1 = "⚠", "Ghostscript no encontrado"
+        l2 = ("Instalalo para poder comprimir PDFs.\n"
+              "Sin Ghostscript el paso Comprimir no puede ejecutarse.")
+
+    banner = tk.Frame(outer, bg=bg_c, padx=14, pady=10,
+                      highlightbackground=dot_c, highlightthickness=1)
+    banner.pack(fill="x")
+
+    tk.Label(banner, text=icon, font=("Segoe UI", 18),
+             bg=bg_c, fg=dot_c).pack(side="left", padx=(0, 12))
+
+    txt = tk.Frame(banner, bg=bg_c)
+    txt.pack(side="left", fill="x", expand=True)
+    tk.Label(txt, text=l1, font=("Segoe UI", 9, "bold"),
+             bg=bg_c, fg=fg_c, anchor="w").pack(anchor="w")
+    tk.Label(txt, text=l2, font=("Segoe UI", 8),
+             bg=bg_c, fg=fg_c, anchor="w", justify="left").pack(
+                 anchor="w", pady=(1, 0))
+
+    if not gs_cmd:
+        def _abrir():
+            import webbrowser
+            webbrowser.open("https://www.ghostscript.com/download/gsdnld.html")
+        tk.Button(banner, text="Descargar Ghostscript →",
+                  bg=bg_c, fg="#0969da",
+                  relief="flat", bd=0,
+                  font=("Segoe UI", 8, "underline"),
+                  cursor="hand2",
+                  activebackground=bg_c,
+                  activeforeground="#0550ae",
+                  command=_abrir).pack(side="right", padx=(8, 0))
+
+
+# ─── Comprimir ───────────────────────────────────────────────────
+
+class PageComprimir(BasePage):
+    def __init__(self, parent, app):
+        super().__init__(parent, app)
+        cfg = _leer_cfg()
+
+        self._build_header(
+            "🗜", "Comprimir PDFs",
+            "Ghostscript reduce el peso de cada PDF en la carpeta (paso previo a unir)",
+        )
+        _pack_ghostscript_banner(self._body)
+
+        card = self._build_card("Configuración")
+
+        carp_def = cfg.get("descarga", "carpeta_salida", fallback="expediente_pdfs")
+        self.v_carpeta = _make_field(card, 0, "Carpeta de PDFs", carp_def)
+        self._file_btn(card, 0, self.v_carpeta, kind="dir")
+
+        cal_def = cfg.get("union", "calidad", fallback="ebook")
+        self.v_calidad = _make_field(card, 1, "Calidad Ghostscript", cal_def,
+                                     is_combo=True,
+                                     combo_values=["screen", "ebook", "printer", "prepress"],
+                                     width=14)
+        _question_btn(card, 1, 2, "gs_calidad")
+
+        wrk_def = cfg.get("union", "workers",
+                          fallback=str(max(1, (os.cpu_count() or 4) // 2)))
+        self.v_workers = _make_field(card, 2, "Workers (paralelo)", wrk_def, width=8)
+        _question_btn(card, 2, 2, "workers")
+
+        self.v_dry = _make_field(card, 3, "Dry-run (simular)", False, is_check=True)
+        _question_btn(card, 3, 2, "dry_run")
+
+        self._build_actions([
+            ("💾  Guardar en config.ini", self._guardar, "ghost"),
+            ("▶  Ejecutar compresión",    self._run,     "accent"),
+        ])
+
+    def _guardar(self):
+        cfg = _leer_cfg()
+        cfg.setdefault("union", {})
+        cfg["union"]["calidad"] = self.v_calidad.get()
+        cfg["union"]["workers"] = self.v_workers.get()
+        cfg.setdefault("descarga", {})
+        cfg["descarga"]["carpeta_salida"] = self.v_carpeta.get()
+        _guardar_cfg(cfg)
+        self.app.set_status("✅  config.ini guardado.")
+
+    def _run(self):
+        class Args:
+            carpeta  = Path(self.v_carpeta.get()) if self.v_carpeta.get() else None
+            calidad  = self.v_calidad.get() or None
+            workers  = int(self.v_workers.get() or 4)
+            dry_run  = self.v_dry.get()
+
+        self.app.run_task(scw.cmd_comprimir, Args())
+
+
 # ─── Unir ─────────────────────────────────────────────────────────
 
 class PageUnir(BasePage):
@@ -724,11 +865,10 @@ class PageUnir(BasePage):
         super().__init__(parent, app)
         cfg = _leer_cfg()
 
-        self._build_header("📎", "Unir PDFs",
-                           "Comprime y une todos los PDFs en un único archivo con páginas separadoras")
-
-        # ── Banner de estado Ghostscript ──────────────────────────
-        self._build_gs_banner()
+        self._build_header(
+            "📎", "Unir PDFs",
+            "Página separadora por documento; podés limitar el rango de fechas (nombre del PDF)",
+        )
 
         card = self._build_card("Configuración de unión")
 
@@ -740,236 +880,48 @@ class PageUnir(BasePage):
         self.v_salida = _make_field(card, 1, "Archivo de salida", sal_def)
         self._file_btn(card, 1, self.v_salida, kind="save")
 
-        cal_def = cfg.get("union", "calidad", fallback="ebook")
-        self.v_calidad = _make_field(card, 2, "Calidad Ghostscript", cal_def,
-                                     is_combo=True,
-                                     combo_values=["screen", "ebook", "printer", "prepress"],
-                                     width=14)
-        _question_btn(card, 2, 2, "gs_calidad")
+        self.v_dry = _make_field(card, 2, "Dry-run (simular)", False, is_check=True)
+        _question_btn(card, 2, 2, "dry_run")
 
-        wrk_def = cfg.get("union", "workers",
-                          fallback=str(max(1, (os.cpu_count() or 4) // 2)))
-        self.v_workers = _make_field(card, 3, "Workers Ghostscript", wrk_def, width=8)
-        _question_btn(card, 3, 2, "workers")
-
-        sin_def = cfg.getboolean("union", "sin_comprimir", fallback=False)
-        self.v_sincomp = _make_field(card, 4, "Sin comprimir (omitir Ghostscript)",
-                                     sin_def, is_check=True)
-        _question_btn(card, 4, 2, "sin_comprimir")
-
-        self.v_dry     = _make_field(card, 5, "Dry-run (simular)", False, is_check=True)
-        _question_btn(card, 5, 2, "dry_run")
+        card2 = self._build_card("Solo documentos entre fechas (opcional)")
+        self._build_date_range(
+            card2,
+            row_desde=0,
+            row_hasta=1,
+            with_calendar=True,
+            desde_default=cfg.get("union", "desde", fallback=""),
+            hasta_default=cfg.get("union", "hasta", fallback=""),
+            nota=(
+                "La fecha se toma del inicio del nombre de cada PDF (como los genera la descarga). "
+                "Vacío = unir todos."
+            ),
+        )
 
         self._build_actions([
             ("💾  Guardar en config.ini", self._guardar, "ghost"),
             ("▶  Ejecutar unión",         self._run,     "accent"),
         ])
 
-    def _build_gs_banner(self):
-        """Banner que muestra si Ghostscript está instalado o no."""
-        import shutil as _sh
-
-        gs_cmd = None
-        for nombre in ["gswin64c", "gswin32c", "gs", "gsc"]:
-            if _sh.which(nombre):
-                gs_cmd = nombre
-                break
-
-        version = ""
-        if gs_cmd:
-            try:
-                import subprocess as _sp
-                r = _sp.run([gs_cmd, "--version"],
-                            capture_output=True, text=True, timeout=5)
-                version = r.stdout.strip()
-            except Exception:
-                version = "instalado"
-
-        outer = tk.Frame(self._body, bg=C_CONTENT_BG)
-        outer.pack(fill="x", padx=14, pady=(8, 0))
-
-        if gs_cmd:
-            bg_c  = "#e6f4ea"
-            fg_c  = "#1a7f37"
-            dot_c = "#2da44e"
-            icon  = "✔"
-            l1    = f"Ghostscript  {version}"
-            l2    = f"Compresión disponible  ·  ejecutable: {gs_cmd}"
-        else:
-            bg_c  = "#fff8e6"
-            fg_c  = "#7d4e00"
-            dot_c = "#e3b341"
-            icon  = "⚠"
-            l1    = "Ghostscript no encontrado"
-            l2    = ("La unión se hará sin comprimir (archivos más grandes).\n"
-                     "Instalalo para habilitar la compresión.")
-
-        banner = tk.Frame(outer, bg=bg_c, padx=14, pady=10,
-                          highlightbackground=dot_c, highlightthickness=1)
-        banner.pack(fill="x")
-
-        # Ícono
-        tk.Label(banner, text=icon, font=("Segoe UI", 18),
-                 bg=bg_c, fg=dot_c).pack(side="left", padx=(0, 12))
-
-        # Texto
-        txt = tk.Frame(banner, bg=bg_c)
-        txt.pack(side="left", fill="x", expand=True)
-        tk.Label(txt, text=l1, font=("Segoe UI", 9, "bold"),
-                 bg=bg_c, fg=fg_c, anchor="w").pack(anchor="w")
-        tk.Label(txt, text=l2, font=("Segoe UI", 8),
-                 bg=bg_c, fg=fg_c, anchor="w", justify="left").pack(
-                     anchor="w", pady=(1, 0))
-
-        # Botón de descarga solo si no está instalado
-        if not gs_cmd:
-            def _abrir():
-                import webbrowser
-                webbrowser.open(
-                    "https://www.ghostscript.com/download/gsdnld.html")
-            tk.Button(banner, text="Descargar Ghostscript →",
-                      bg=bg_c, fg="#0969da",
-                      relief="flat", bd=0,
-                      font=("Segoe UI", 8, "underline"),
-                      cursor="hand2",
-                      activebackground=bg_c,
-                      activeforeground="#0550ae",
-                      command=_abrir).pack(side="right", padx=(8, 0))
-
     def _guardar(self):
         cfg = _leer_cfg()
         cfg.setdefault("union", {})
         cfg["union"]["archivo_salida"] = self.v_salida.get()
-        cfg["union"]["calidad"]        = self.v_calidad.get()
-        cfg["union"]["workers"]        = self.v_workers.get()
-        cfg["union"]["sin_comprimir"]  = str(self.v_sincomp.get()).lower()
+        cfg["union"]["desde"] = self.v_desde.get().strip()
+        cfg["union"]["hasta"] = self.v_hasta.get().strip()
+        cfg.setdefault("descarga", {})
+        cfg["descarga"]["carpeta_salida"] = self.v_carpeta.get()
         _guardar_cfg(cfg)
         self.app.set_status("✅  config.ini guardado.")
 
     def _run(self):
         class Args:
-            carpeta       = Path(self.v_carpeta.get()) if self.v_carpeta.get() else None
-            salida        = Path(self.v_salida.get()) if self.v_salida.get() else None
-            calidad       = self.v_calidad.get() or None
-            workers       = int(self.v_workers.get() or 4)
-            sin_comprimir = self.v_sincomp.get()
-            dry_run       = self.v_dry.get()
+            carpeta = Path(self.v_carpeta.get()) if self.v_carpeta.get() else None
+            salida  = Path(self.v_salida.get()) if self.v_salida.get() else None
+            dry_run = self.v_dry.get()
+            desde   = self.v_desde.get().strip() or None
+            hasta   = self.v_hasta.get().strip() or None
+
         self.app.run_task(scw.cmd_unir, Args())
-
-
-# ─── Dividir ──────────────────────────────────────────────────────
-
-class PageDividir(BasePage):
-    def __init__(self, parent, app):
-        super().__init__(parent, app)
-        cfg = _leer_cfg()
-
-        self._build_header("✂", "Dividir por período",
-                           "Divide el PDF unificado por año o por mes con límite de tamaño configurable")
-
-        card = self._build_card("Configuración de división")
-
-        ent_def = cfg.get("division", "archivo_entrada",
-                          fallback="expediente_unificado.pdf")
-        self.v_entrada = _make_field(card, 0, "PDF a dividir", ent_def)
-        self._file_btn(card, 0, self.v_entrada, kind="open")
-
-        sal_def = cfg.get("division", "carpeta_salida", fallback="expediente_por_año")
-        self.v_salida = _make_field(card, 1, "Carpeta de salida", sal_def)
-        self._file_btn(card, 1, self.v_salida, kind="dir")
-        _question_btn(card, 1, 3, "carpeta_salida")
-
-        mb_def = cfg.get("division", "max_mb", fallback="40")
-        self.v_maxmb = _make_field(card, 2, "Tamaño máximo por archivo (MB)",
-                                   mb_def, width=8)
-        _question_btn(card, 2, 2, "max_mb")
-
-        # Modo: año / mes
-        self.v_modo = _make_field(card, 3, "Dividir por",
-                                  "año", is_combo=True,
-                                  combo_values=["año", "mes"], width=8)
-        _question_btn(card, 3, 2, "modo_division")
-
-        # Fila de filtro — cambia según el modo
-        self._filtro_lbl = tk.Label(card,
-                                    text="Solo un año (vacío = todos)",
-                                    font=FONT_UI, bg=C_WHITE,
-                                    fg=C_TEXT_MUTED, anchor="w")
-        self._filtro_lbl.grid(row=4, column=0, sticky="w", padx=(0, 14), pady=4)
-
-        self.v_filtro = tk.StringVar(value="")
-        self._filtro_ent = tk.Entry(card, textvariable=self.v_filtro,
-                                    width=12, font=FONT_UI, relief="solid",
-                                    bd=1, bg=C_WHITE, fg=C_TEXT,
-                                    highlightthickness=1,
-                                    highlightbackground=C_BORDER,
-                                    highlightcolor=C_ACCENT)
-        self._filtro_ent.grid(row=4, column=1, sticky="w", pady=4)
-        self._q_filtro = _question_btn(card, 4, 2, "solo_año")
-
-        # Nota de ejemplo dinámica
-        self._nota_filtro = tk.Label(card, text="Ej: 2023",
-                                     font=("Segoe UI", 7),
-                                     bg=C_WHITE, fg=C_TEXT_MUTED, anchor="w")
-        self._nota_filtro.grid(row=4, column=3, sticky="w", padx=(8, 0), pady=4)
-
-        self.v_dry = _make_field(card, 5, "Dry-run (simular)", False, is_check=True)
-        _question_btn(card, 5, 2, "dry_run")
-
-        # Actualizar labels cuando cambia el modo
-        self.v_modo.trace_add("write", self._on_modo_change)
-
-        # Card de rango de fechas
-        card2 = self._build_card("Rango de fechas (opcional)")
-        self._build_date_range(card2, row_desde=0, row_hasta=1)
-
-        self._build_actions([
-            ("💾  Guardar en config.ini", self._guardar, "ghost"),
-            ("▶  Ejecutar división",      self._run,     "accent"),
-        ])
-
-    def _on_modo_change(self, *_):
-        if self.v_modo.get() == "mes":
-            self._filtro_lbl.config(text="Solo un mes (vacío = todos)")
-            self._nota_filtro.config(text="Ej: 2023-05")
-            # Actualizar tooltip del filtro
-            self._q_filtro.destroy()
-            self._q_filtro = _question_btn(
-                self._filtro_lbl.master, 4, 2, "solo_mes")
-        else:
-            self._filtro_lbl.config(text="Solo un año (vacío = todos)")
-            self._nota_filtro.config(text="Ej: 2023")
-            self._q_filtro.destroy()
-            self._q_filtro = _question_btn(
-                self._filtro_lbl.master, 4, 2, "solo_año")
-
-    def _guardar(self):
-        cfg = _leer_cfg()
-        cfg.setdefault("division", {})
-        cfg["division"]["archivo_entrada"] = self.v_entrada.get()
-        cfg["division"]["carpeta_salida"]  = self.v_salida.get()
-        cfg["division"]["max_mb"]          = self.v_maxmb.get()
-        _guardar_cfg(cfg)
-        self.app.set_status("✅  config.ini guardado.")
-
-    def _run(self):
-        modo   = self.v_modo.get()
-        filtro = self.v_filtro.get().strip() or None
-        desde  = self.v_desde.get().strip() if hasattr(self, 'v_desde') else ""
-        hasta  = self.v_hasta.get().strip() if hasattr(self, 'v_hasta') else ""
-
-        class Args:
-            entrada  = Path(self.v_entrada.get()) if self.v_entrada.get() else None
-            salida   = Path(self.v_salida.get()) if self.v_salida.get() else None
-            max_mb   = float(self.v_maxmb.get() or 40)
-            solo_año = filtro if modo == "año" else None
-            solo_mes = filtro if modo == "mes" else None
-            dry_run  = self.v_dry.get()
-
-        Args.modo  = modo
-        Args.desde = desde or None
-        Args.hasta = hasta or None
-        self.app.run_task(scw.cmd_dividir, Args())
 
 
 # ─── Flujo completo ───────────────────────────────────────────────
@@ -979,8 +931,10 @@ class PageTodo(BasePage):
         super().__init__(parent, app)
         cfg = _leer_cfg()
 
-        self._build_header("🔄", "Flujo completo",
-                           "Ejecuta los 3 pasos en secuencia: Descargar → Unir → Dividir")
+        self._build_header(
+            "🔄", "Flujo completo",
+            "Descargar → Comprimir → Unir (un solo clic)",
+        )
 
         # Pasos visuales
         steps_frame = tk.Frame(self._body, bg=C_CONTENT_BG)
@@ -988,8 +942,8 @@ class PageTodo(BasePage):
 
         steps = [
             ("1", "⬇", "Descargar",  "Scraping + descarga de PDFs"),
-            ("2", "📎", "Unir",       "Comprimir y unificar"),
-            ("3", "✂", "Dividir",    "Separar por año"),
+            ("2", "🗜", "Comprimir",  "Ghostscript reduce el peso"),
+            ("3", "📎", "Unir",       "Separadores + PDF único"),
         ]
         for num, icon, title, desc in steps:
             s = tk.Frame(steps_frame, bg=C_BORDER, padx=1, pady=1)
@@ -1010,28 +964,38 @@ class PageTodo(BasePage):
                           fallback="https://scw.pjn.gov.ar/scw/expediente.seam?cid=682804")
         self.v_url = _make_field(card, 0, "URL del expediente", url_def, width=52)
         _question_btn(card, 0, 2, "url")
-        self.v_dry = _make_field(card, 1, "Dry-run (simular todo sin ejecutar)", False,
+        self.v_sincomp = _make_field(
+            card, 1, "Sin comprimir (omitir paso Comprimir en este flujo)",
+            cfg.getboolean("union", "sin_comprimir", fallback=False),
+            is_check=True,
+        )
+        _question_btn(card, 1, 2, "sin_comprimir")
+        self.v_dry = _make_field(card, 2, "Dry-run (simular todo sin ejecutar)", False,
                                  is_check=True)
-        _question_btn(card, 1, 2, "dry_run")
+        _question_btn(card, 2, 2, "dry_run")
 
         self._build_actions([
             ("▶▶  Ejecutar flujo completo", self._run, "accent"),
         ])
 
     def _run(self):
+        cfg = _leer_cfg()
+        u_desde = cfg.get("union", "desde", fallback="").strip() or None
+        u_hasta = cfg.get("union", "hasta", fallback="").strip() or None
+
         class Args:
             url           = self.v_url.get() or None
             carpeta       = None
             salida        = None
             calidad       = None
             workers       = None
-            sin_comprimir = False
-            entrada       = None
-            max_mb        = None
-            solo_año      = None
+            sin_comprimir = self.v_sincomp.get()
             concurrentes  = None
             reintentos    = None
             dry_run       = self.v_dry.get()
+            desde         = u_desde
+            hasta         = u_hasta
+
         self.app.run_task(scw.cmd_todo, Args())
 
 
@@ -1352,8 +1316,9 @@ class PageAyuda(BasePage):
                     "SCW es una herramienta para descargar, unir y organizar los documentos "
                     "de un expediente judicial del Sistema de Consulta Web del Poder Judicial "
                     "de la Nación (scw.pjn.gov.ar).\n\n"
-                    "El flujo típico es: descargar todos los PDFs → unirlos en un solo archivo "
-                    "→ dividir ese archivo por año para manejarlo más fácilmente."
+                    "El flujo típico es: descargar los PDFs → comprimirlos con Ghostscript → "
+                    "unirlos en un solo PDF con página separadora por documento.\n"
+                    "En unir podés acotar por rango de fechas según el nombre de cada archivo."
                 )),
             ]
         },
@@ -1367,16 +1332,17 @@ class PageAyuda(BasePage):
                 ("Dependencias Python",
                  "Abrí una terminal en la carpeta del proyecto y ejecutá:\n"
                  "  pip install -r requirements.txt\n\n"
-                 "Esto instala: pypdf, reportlab, playwright, httpx."),
+                 "Esto instala: pypdf, reportlab, playwright, httpx, tkcalendar."),
                 ("Navegador Chromium (para descargar)",
                  "Después de instalar las dependencias, ejecutá:\n"
                  "  playwright install chromium\n\n"
                  "Solo se necesita una vez. Instala un navegador interno que "
                  "usa el programa para acceder al expediente."),
-                ("Ghostscript (opcional, para comprimir)",
+                ("Ghostscript (para comprimir)",
                  "Descargalo desde ghostscript.com/download/gsdnld.html\n"
-                 "Sin él, la unión funciona igual pero sin comprimir los PDFs.\n"
-                 "La sección 'Unir PDFs' muestra si está instalado o no."),
+                 "Lo usa el paso 'Comprimir PDFs' y el flujo completo.\n"
+                 "Sin él podés unir igual; en 'Flujo completo' tildá\n"
+                 "'Sin comprimir' para saltar ese paso."),
             ]
         },
         {
@@ -1405,37 +1371,38 @@ class PageAyuda(BasePage):
             ]
         },
         {
-            "titulo": "Paso 2 — Unir PDFs",
-            "icono": "📎",
+            "titulo": "Paso 2 — Comprimir PDFs",
+            "icono": "🗜",
             "items": [
                 ("¿Qué hace este paso?",
-                 "Toma todos los PDFs descargados y los une en un único\n"
-                 "archivo, insertando una página separadora entre cada uno\n"
-                 "con la fecha, tipo y descripción del documento."),
-                ("Calidad de compresión",
-                 "• screen  → archivo pequeño, para compartir por mail\n"
-                 "• ebook   → equilibrio recomendado (default)\n"
-                 "• printer → alta calidad, para imprimir\n"
-                 "Usá el botón ? al lado del combo para más detalles."),
-                ("Sin comprimir",
-                 "Si Ghostscript no está instalado o querés velocidad,\n"
-                 "tildá 'Sin comprimir'. El resultado es igual pero más grande."),
+                 "Recorre cada PDF de la carpeta y lo vuelve a guardar\n"
+                 "con Ghostscript para reducir el tamaño antes de unir.\n"
+                 "Si el archivo ya es pequeño, puede dejarse igual."),
+                ("Calidad",
+                 "• screen  → mínimo peso\n"
+                 "• ebook   → equilibrio (recomendado)\n"
+                 "• printer / prepress → más calidad, más peso\n"
+                 "Usá el botón ? junto al combo para más detalle."),
+                ("Workers",
+                 "Cuántos archivos se comprimen en paralelo.\n"
+                 "Si la PC se pone lenta, bajá el número."),
             ]
         },
         {
-            "titulo": "Paso 3 — Dividir por año",
-            "icono": "✂",
+            "titulo": "Paso 3 — Unir PDFs",
+            "icono": "📎",
             "items": [
                 ("¿Qué hace este paso?",
-                 "Divide el PDF unificado separándolo por año de los documentos.\n"
-                 "Si un año tiene muchos documentos y supera el límite de MB\n"
-                 "configurado, lo divide en partes: 2022_parte1, 2022_parte2..."),
-                ("Tamaño máximo",
-                 "40 MB es un buen valor para adjuntar en correos o sistemas\n"
-                 "judiciales. Bajalo a 25 si tenés restricciones más estrictas."),
-                ("Exportar un solo año",
-                 "Si completás el campo 'Solo un año' (ej: 2023), solo se\n"
-                 "genera el PDF de ese año. Útil para buscar algo puntual."),
+                 "Une todos los PDFs de la carpeta en un solo archivo, en orden\n"
+                 "de nombre. Antes de cada documento inserta una página separadora\n"
+                 "con fecha, tipo y descripción (según el nombre del archivo)."),
+                ("Filtrar por fechas",
+                 "Podés limitar qué PDFs entran usando Desde / Hasta (DD/MM/AAAA).\n"
+                 "La fecha se infiere del comienzo del nombre de cada PDF.\n"
+                 "Usá el botón 📅 o escribí a mano. Vacío = incluir todos."),
+                ("Antes de unir",
+                 "Conviene haber comprimido en el paso anterior para que\n"
+                 "el PDF unificado no quede enorme."),
             ]
         },
         {
@@ -1443,10 +1410,11 @@ class PageAyuda(BasePage):
             "icono": "🔄",
             "items": [
                 ("", (
-                    "La sección 'Flujo completo' ejecuta los 3 pasos en secuencia\n"
-                    "con un solo clic, usando los parámetros guardados en config.ini.\n\n"
-                    "Recomendado una vez que ya configuraste todo y querés\n"
-                    "procesar un expediente de principio a fin."
+                    "La sección 'Flujo completo' ejecuta en secuencia: descargar,\n"
+                    "comprimir y unir, con los valores de config.ini.\n\n"
+                    "El rango de fechas del paso Unir se toma de [union] desde/hasta\n"
+                    "si lo guardaste ahí. Podés tildar 'Sin comprimir' para saltar\n"
+                    "Ghostscript si no lo tenés o los PDFs ya están optimizados."
                 )),
             ]
         },
@@ -1491,10 +1459,10 @@ class PageAyuda(BasePage):
                 ("Faltan PDFs al terminar",
                  "Aumentá la 'Pausa entre páginas' a 6 o más segundos.\n"
                  "El servidor puede ser lento y la tabla no termina de cargar."),
-                ("Ghostscript no encontrado",
+                ("Ghostscript no encontrado (al comprimir)",
                  "Descargá el instalador de 64 bits desde:\n"
                  "ghostscript.com/download/gsdnld.html\n"
-                 "Reiniciá el programa después de instalarlo."),
+                 "O usá 'Sin comprimir' en el flujo completo y uní sin comprimir."),
                 ("Error al importar módulos",
                  "Ejecutá en la carpeta del proyecto:\n"
                  "pip install -r requirements.txt\n"
@@ -1652,10 +1620,10 @@ class App(tk.Tk):
         nav = [
             ("📂  Expedientes",     "expedientes", PageExpedientes),
             ("⬇   Descargar",      "descargar",   PageDescargar),
-            ("📎  Unir PDFs",       "unir",        PageUnir),
-            ("✂   Dividir",        "dividir",     PageDividir),
-            ("🔄  Flujo completo",  "todo",        PageTodo),
-            ("📖  Guía de uso",     "ayuda",       PageAyuda),
+            ("🗜   Comprimir",     "comprimir",   PageComprimir),
+            ("📎  Unir PDFs",      "unir",        PageUnir),
+            ("🔄  Flujo completo", "todo",        PageTodo),
+            ("📖  Guía de uso",    "ayuda",       PageAyuda),
         ]
 
         for label, key, PageCls in nav:

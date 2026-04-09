@@ -2,7 +2,7 @@
 """
 ══════════════════════════════════════════════════════════════════
   SCW – Herramienta unificada para expedientes del Poder Judicial
-         Descargador · Unificador · Divisor
+         Descargador · Unificador
 ══════════════════════════════════════════════════════════════════
 Requisitos:
     pip install -r requirements.txt
@@ -14,16 +14,16 @@ Para compresión (opcional):
     Linux   : sudo apt install ghostscript
 
 Uso (desde la raíz del repositorio):
-    python -m pjn_scw.cli                ← menú interactivo
-    python -m pjn_scw.cli descargar    ← solo descargar PDFs
-    python -m pjn_scw.cli unir         ← solo unir PDFs
-    python -m pjn_scw.cli dividir      ← solo dividir por año
-    python -m pjn_scw.cli todo         ← los 3 pasos en secuencia
+    python -m pjn_scw.cli                 ← menú interactivo
+    python -m pjn_scw.cli descargar     ← descargar PDFs
+    python -m pjn_scw.cli comprimir     ← comprimir PDFs (Ghostscript)
+    python -m pjn_scw.cli unir          ← unir PDFs (separadores + filtro por fechas opcional)
+    python -m pjn_scw.cli todo          ← descargar → comprimir → unir
     python -m pjn_scw.cli todo --dry-run
     python -m pjn_scw.cli descargar --url "https://scw.pjn.gov.ar/..."
-    python -m pjn_scw.cli unir --calidad screen --workers 8
-    python -m pjn_scw.cli dividir --max-mb 25 --solo-año 2023
-    python -m pjn_scw.cli estado       ← resumen de archivos existentes
+    python -m pjn_scw.cli comprimir --calidad ebook --workers 8
+    python -m pjn_scw.cli unir --desde 01/01/2023 --hasta 31/12/2024
+    python -m pjn_scw.cli estado        ← resumen de archivos existentes
 """
 
 # ── Imports estándar ──────────────────────────────────────────────────────────
@@ -134,10 +134,8 @@ CFG = {
     "calidad":           _cs("union", "calidad",              "ebook"),
     "workers":           _ci("union", "workers",              max(1, os.cpu_count() // 2)),
     "sin_comprimir":     _cb("union", "sin_comprimir",        False),
-    # division
-    "carpeta_años":      Path(_cs("division", "carpeta_salida", "expediente_por_año")),
-    "max_mb":            _cf("division", "max_mb",            40.0),
-    "solo_año":          _cs("division", "solo_año",          "") or None,
+    "unir_desde":        _cs("union", "desde",                ""),
+    "unir_hasta":        _cs("union", "hasta",                ""),
 }
 
 
@@ -159,8 +157,6 @@ def _path_cfg(path_like: Path | str) -> Path:
 # Constantes de diseño
 COLOR_AZUL = (0.12, 0.31, 0.58)
 COLOR_NEG  = (0.1, 0.1, 0.1)
-PATRON_FECHA     = re.compile(r'\b(20\d{2})-\d{2}-\d{2}\b')
-PATRON_FECHA_MES = re.compile(r'\b(20\d{2})-(\d{2})-\d{2}\b')
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -183,6 +179,9 @@ def _setup_logging():
     return logging.getLogger("scw")
 
 log = _setup_logging()
+
+# Última carpeta de descarga exitosa (para encadenar comprimir/unir en `todo`).
+ULTIMA_CARPETA_DESCARGA: Path | None = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -304,27 +303,12 @@ def cmd_estado(_args):
     else:
         print(f"     Existe    : no")
 
-    # PDFs por año
-    carpeta_años = _path_cfg(CFG["carpeta_años"])
-    print(f"\n  📂 PDFs por año  ({carpeta_años})")
-    if carpeta_años.exists():
-        partes = sorted(carpeta_años.glob("expediente_*.pdf"))
-        if partes:
-            for p in partes:
-                alerta = "  ⚠" if p.stat().st_size / 1_048_576 > CFG["max_mb"] + 1 else ""
-                print(f"     {p.name:<50} {_mb(p)}{alerta}")
-        else:
-            print("     (vacío)")
-    else:
-        print("     Carpeta no creada aún")
-
     # Config activa
     print(f"\n  ⚙  Configuración activa (config.ini)")
     print(f"     URL          : {CFG['url_default']}")
     print(f"     Concurrentes : {CFG['max_concurrentes']}")
     print(f"     Calidad GS   : {CFG['calidad']}")
     print(f"     Workers GS   : {CFG['workers']}")
-    print(f"     Límite div.  : {CFG['max_mb']} MB")
     print(f"\n{'═'*58}\n")
 
 
@@ -549,34 +533,6 @@ def _en_rango_fecha(fecha_iso: str, desde_iso: str | None, hasta_iso: str | None
     if desde_iso and fecha_iso < desde_iso:
         return False
     if hasta_iso and fecha_iso > hasta_iso:
-        return False
-    return True
-
-def _periodo_en_rango(periodo: str, desde_iso: str | None, hasta_iso: str | None) -> bool:
-    """
-    Verifica si un período ('2023' o '2023-05') está dentro del rango.
-    Un período se incluye si tiene cualquier superposición con el rango.
-    """
-    if not desde_iso and not hasta_iso:
-        return True
-    if periodo == "sin_fecha":
-        return True  # siempre incluir documentos sin fecha
-
-    # Convertir período a rango de fechas
-    if re.match(r'^\d{4}-\d{2}$', periodo):
-        p_desde = f"{periodo}-01"
-        p_hasta = f"{periodo}-31"
-    elif re.match(r'^\d{4}$', periodo):
-        p_desde = f"{periodo}-01-01"
-        p_hasta = f"{periodo}-12-31"
-    else:
-        return True  # formato desconocido, incluir
-
-    # Superposición: el período empieza antes de que termine el rango
-    #               Y el período termina después de que empieza el rango
-    if hasta_iso and p_desde > hasta_iso:
-        return False
-    if desde_iso and p_hasta < desde_iso:
         return False
     return True
 
@@ -1311,7 +1267,119 @@ async def _run_descargar(args):
     return contador, carpeta
 
 def cmd_descargar(args):
-    asyncio.run(_run_descargar(args))
+    global ULTIMA_CARPETA_DESCARGA
+    out = asyncio.run(_run_descargar(args))
+    if out is not None:
+        ULTIMA_CARPETA_DESCARGA = out[1].resolve()
+
+
+def _carpeta_trabajo_todo(args) -> Path:
+    """Tras `descargar` en el flujo `todo`, usa la misma carpeta para comprimir/unir."""
+    if getattr(args, "carpeta", None):
+        return _path_cfg(args.carpeta)
+    if ULTIMA_CARPETA_DESCARGA is not None:
+        return ULTIMA_CARPETA_DESCARGA
+    return _path_cfg(CFG["carpeta_pdfs"])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  COMANDO: COMPRIMIR (Ghostscript, in-place)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def cmd_comprimir(args):
+    """Comprime cada PDF de la carpeta con Ghostscript y reemplaza el archivo si baja de tamaño."""
+    carpeta = (
+        _path_cfg(args.carpeta)
+        if getattr(args, "carpeta", None)
+        else _path_cfg(CFG["carpeta_pdfs"])
+    )
+    calidad = getattr(args, "calidad", None) or CFG["calidad"]
+    workers = getattr(args, "workers", None) or CFG["workers"]
+    dry_run = getattr(args, "dry_run", False)
+
+    gs_cmd = _buscar_ghostscript()
+    if not gs_cmd:
+        log.error("Ghostscript no encontrado. Instalalo para comprimir PDFs.")
+        sys.exit(1)
+
+    if not carpeta.is_dir():
+        log.error("La carpeta '%s' no existe o no es un directorio.", carpeta)
+        sys.exit(1)
+
+    pdfs = sorted([p for p in carpeta.glob("*.pdf") if not p.name.startswith("_")])
+    if not pdfs:
+        log.error("No se encontraron PDFs en '%s'.", carpeta)
+        sys.exit(1)
+
+    workers = min(max(1, int(workers)), len(pdfs))
+
+    print(f"\n{'═'*58}")
+    print(f"  COMPRIMIR PDFs (Ghostscript)")
+    if dry_run:
+        print("  *** MODO DRY-RUN: no se modificará ningún archivo ***")
+    print(f"{'═'*58}")
+    print(f"  Carpeta  : {carpeta.resolve()}")
+    print(f"  Archivos : {len(pdfs)}")
+    print(f"  Calidad  : {calidad}")
+    print(f"  Workers  : {workers}\n")
+    log.info("Compresión iniciada — %d PDFs, calidad %s", len(pdfs), calidad)
+
+    if dry_run:
+        print(f"  [DRY-RUN] Se comprimirían {len(pdfs)} PDFs in-place.")
+        log.info("Dry-run: compresión simulada.")
+        return
+
+    carpeta_temp = Path(tempfile.mkdtemp(prefix="scw_comp_"))
+    tareas = [(pdf, carpeta_temp, calidad, gs_cmd) for pdf in pdfs]
+    reemplazados = sin_cambio = errores = 0
+    t0 = time.time()
+
+    try:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_comprimir_pdf, t): t[0] for t in tareas}
+            hecho = 0
+            for fut in concurrent.futures.as_completed(futures):
+                hecho += 1
+                orig, comp, ok, msg = fut.result()
+                if not ok:
+                    errores += 1
+                    log.warning("Compresión falló %s: %s", orig.name, msg)
+                elif comp == orig:
+                    sin_cambio += 1
+                else:
+                    try:
+                        os.replace(comp, orig)
+                        reemplazados += 1
+                    except OSError as e:
+                        errores += 1
+                        log.warning("No se pudo reemplazar %s: %s", orig.name, e)
+                if hecho % 10 == 0 or hecho == len(pdfs):
+                    elapsed = time.time() - t0
+                    eta = (elapsed / hecho) * (len(pdfs) - hecho) if hecho else 0
+                    pct = hecho * 100 // len(pdfs)
+                    print(
+                        f"  [{_barra(hecho, len(pdfs))}] {pct:3d}%"
+                        f"  {hecho}/{len(pdfs)}  ETA {eta:.0f}s  err {errores}",
+                        end="\r",
+                    )
+        print()
+    finally:
+        shutil.rmtree(carpeta_temp, ignore_errors=True)
+
+    log.info(
+        "Compresión terminada: reemplazados=%d sin_cambio=%d errores=%d",
+        reemplazados,
+        sin_cambio,
+        errores,
+    )
+    print(f"\n{'─'*58}")
+    print(f"  ✓  Reemplazados (más livianos) : {reemplazados}")
+    print(f"  –  Sin cambio / igual tamaño   : {sin_cambio}")
+    if errores:
+        print(f"  !  Errores                     : {errores}")
+    print(f"  📁  Carpeta                     : {carpeta.resolve()}")
+    print(f"{'─'*58}\n")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1417,407 +1485,161 @@ def _agregar_pdf_seguro(ruta: Path, writer: PdfWriter) -> int:
         log.warning("SKIP '%s': %s", ruta.name, e)
         return 0
 
+
+def _fecha_iso_desde_stem_pdf(stem: str) -> str | None:
+    """
+    Obtiene AAAA-MM-DD desde el nombre del archivo generado al descargar
+    (p. ej. '2024-05-15 - Tipo - Detalle' o con sufijo ' (2)' por duplicados).
+    """
+    s = re.sub(r" \(\d+\)$", "", stem.strip())
+    primera = s.split(" - ", 1)[0].strip() if " - " in s else s
+    if not primera or primera.lower() == "sin_fecha":
+        return None
+    iso = _fecha_a_iso(primera)
+    if iso:
+        return iso
+    return _fecha_a_iso(_parsear_fecha(primera))
+
+
 def cmd_unir(args):
+    """Une PDFs con página separadora por archivo; filtro opcional por fecha del documento (nombre de archivo)."""
     _verificar_deps([
-        (_PYPDF_OK,      "pypdf",     "pypdf"),
-        (_REPORTLAB_OK,  "reportlab", "reportlab"),
+        (_PYPDF_OK, "pypdf", "pypdf"),
+        (_REPORTLAB_OK, "reportlab", "reportlab"),
     ])
 
-    carpeta    = _path_cfg(args.carpeta) if args.carpeta else _path_cfg(CFG["carpeta_pdfs"])
-    salida     = _path_cfg(args.salida) if args.salida else _path_cfg(CFG["archivo_unificado"])
-    calidad    = args.calidad  or CFG["calidad"]
-    workers    = args.workers  or CFG["workers"]
-    sin_comp   = args.sin_comprimir or CFG["sin_comprimir"]
-    dry_run    = getattr(args, "dry_run", False)
+    carpeta = (
+        _path_cfg(args.carpeta)
+        if getattr(args, "carpeta", None)
+        else _path_cfg(CFG["carpeta_pdfs"])
+    )
+    salida = (
+        _path_cfg(args.salida)
+        if getattr(args, "salida", None)
+        else _path_cfg(CFG["archivo_unificado"])
+    )
+    dry_run = getattr(args, "dry_run", False)
+
+    ad = getattr(args, "desde", None)
+    ah = getattr(args, "hasta", None)
+    desde_raw = ad.strip() if isinstance(ad, str) and ad.strip() else CFG["unir_desde"].strip()
+    hasta_raw = ah.strip() if isinstance(ah, str) and ah.strip() else CFG["unir_hasta"].strip()
+
+    desde_iso = _fecha_a_iso(desde_raw) if desde_raw else None
+    hasta_iso = _hasta_iso(hasta_raw) if hasta_raw else None
+    if desde_raw and not desde_iso:
+        log.error("No se pudo interpretar la fecha 'desde': %s", desde_raw)
+        sys.exit(1)
+    if hasta_raw and not hasta_iso:
+        log.error("No se pudo interpretar la fecha 'hasta': %s", hasta_raw)
+        sys.exit(1)
 
     if not carpeta.exists():
         log.error("La carpeta '%s' no existe.", carpeta)
         sys.exit(1)
 
-    pdfs = sorted([p for p in carpeta.glob("*.pdf") if not p.name.startswith("_")])
-    if not pdfs:
+    todos = sorted([p for p in carpeta.glob("*.pdf") if not p.name.startswith("_")])
+    if not todos:
         log.error("No se encontraron PDFs en '%s'.", carpeta)
         sys.exit(1)
 
-    gs_cmd = _buscar_ghostscript()
-    if not gs_cmd and not sin_comp:
-        log.warning("Ghostscript no encontrado — se unirá sin comprimir.")
-        sin_comp = True
+    filtro_activo = bool(desde_iso or hasta_iso)
+    pdfs: list[Path] = []
+    excluidos = 0
+    sin_fecha = 0
+    for p in todos:
+        if not filtro_activo:
+            pdfs.append(p)
+            continue
+        iso_doc = _fecha_iso_desde_stem_pdf(p.stem)
+        if iso_doc is None:
+            sin_fecha += 1
+            excluidos += 1
+            continue
+        if _en_rango_fecha(iso_doc, desde_iso, hasta_iso):
+            pdfs.append(p)
+        else:
+            excluidos += 1
 
-    workers = min(workers, len(pdfs))
+    if filtro_activo and sin_fecha:
+        log.info(
+            "%d PDF(s) sin fecha reconocible en el nombre (omitidos con filtro activo).",
+            sin_fecha,
+        )
+        print(f"  Info    : {sin_fecha} PDF(s) sin fecha en el nombre → omitidos (filtro activo).")
+
+    if not pdfs:
+        log.error(
+            "Ningún PDF queda para unir%s.",
+            " con el rango indicado" if filtro_activo else "",
+        )
+        sys.exit(1)
 
     print(f"\n{'═'*58}")
-    print(f"  PASO 2 — Unificación de PDFs")
+    print("  UNIR PDFs (separadores entre documentos)")
     if dry_run:
         print("  *** MODO DRY-RUN: no se escribirá ningún archivo ***")
     print(f"{'═'*58}")
-    print(f"  Carpeta : {carpeta.resolve()}")
-    print(f"  PDFs    : {len(pdfs)}")
-    print(f"  Salida  : {salida}")
-    print(f"  Calidad : {'sin comprimir' if sin_comp else calidad}")
-    print(f"  Workers : {workers}\n")
-    log.info("Unificación iniciada — %d PDFs, calidad: %s", len(pdfs), calidad)
+    print(f"  Carpeta    : {carpeta.resolve()}")
+    print(f"  PDFs total : {len(todos)}")
+    if filtro_activo:
+        print(f"  Tras filtro: {len(pdfs)}  (excluidos: {excluidos})")
+        print(f"  Rango      : {desde_raw or '...'}  →  {hasta_raw or '...'}")
+    else:
+        print(f"  A unir     : {len(pdfs)}")
+    print(f"  Salida     : {salida}")
+    print("  Nota       : la compresión es el comando `comprimir` (paso aparte).\n")
+    log.info("Unión iniciada — %d PDFs → %s", len(pdfs), salida)
 
     if dry_run:
-        print(f"  [DRY-RUN] Se procesarían {len(pdfs)} PDFs → '{salida}'")
+        print(f"  [DRY-RUN] Se unirían {len(pdfs)} PDFs → '{salida}'")
+        for i, p in enumerate(pdfs[:40], 1):
+            print(f"    {i:3}. {p.name}")
+        if len(pdfs) > 40:
+            print(f"    ... y {len(pdfs) - 40} más.")
         log.info("Dry-run: unión simulada, %d PDFs.", len(pdfs))
         return
 
-    # Fase 1: comprimir
-    mapa: dict[Path, Path] = {}
-    if sin_comp:
-        print("  Fase 1/2 — Compresión omitida.\n")
-        for pdf in pdfs:
-            mapa[pdf] = pdf
-    else:
-        carpeta_temp = Path(tempfile.mkdtemp(prefix="scw_comp_"))
-        print(f"  Fase 1/2 — Comprimiendo {len(pdfs)} PDFs...\n")
-        tareas = [(pdf, carpeta_temp, calidad, gs_cmd) for pdf in pdfs]
-        completados = errores = 0
-        t0 = time.time()
-
-        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(_comprimir_pdf, t): t[0] for t in tareas}
-            for fut in concurrent.futures.as_completed(futures):
-                original, comprimido, exito, msg = fut.result()
-                completados += 1
-                if not exito:
-                    errores += 1
-                mapa[original] = comprimido
-                if completados % 10 == 0 or completados == len(pdfs):
-                    elapsed = time.time() - t0
-                    eta     = (elapsed / completados) * (len(pdfs) - completados)
-                    pct     = completados * 100 // len(pdfs)
-                    print(
-                        f"  [{_barra(completados, len(pdfs))}] {pct:3d}%"
-                        f"  {completados}/{len(pdfs)}"
-                        f"  ETA {eta:.0f}s  err {errores}",
-                        end="\r"
-                    )
-
-        print(f"\n\n  Compresión completa — {completados} archivos, {errores} errores")
-        log.info("Compresión completa: %d archivos, %d errores", completados, errores)
-
-    # Fase 2: unir
-    print(f"\n  Fase 2/2 — Uniendo {len(pdfs)} PDFs...\n")
     writer = PdfWriter()
-    total_paginas = skipped = 0
+    pag_docs = skipped = 0
+    n_sep = 0
 
-    for i, pdf_orig in enumerate(pdfs, 1):
-        pdf_usar = mapa.get(pdf_orig, pdf_orig)
-        nombre   = pdf_orig.stem
+    for i, pdf in enumerate(pdfs, 1):
         if i % 20 == 0 or i == len(pdfs):
-            print(f"  [{_barra(i, len(pdfs))}] {i*100//len(pdfs):3d}%"
-                  f"  {i}/{len(pdfs)}", end="\r")
-
-        sep_bytes = _crear_pagina_separadora(nombre)
-        sep_page  = PdfReader(io.BytesIO(sep_bytes)).pages[0]
-        writer.add_page(sep_page)
-        total_paginas += 1
-
-        n = _agregar_pdf_seguro(pdf_usar, writer)
-        total_paginas += n
+            print(
+                f"  [{_barra(i, len(pdfs))}] {i * 100 // len(pdfs):3d}%"
+                f"  {i}/{len(pdfs)}",
+                end="\r",
+            )
+        try:
+            sep_reader = PdfReader(
+                io.BytesIO(_crear_pagina_separadora(pdf.stem)), strict=False
+            )
+            for page in sep_reader.pages:
+                writer.add_page(page)
+            n_sep += len(sep_reader.pages)
+        except Exception as e:
+            log.warning("Separador '%s': %s", pdf.name, e)
+        n = _agregar_pdf_seguro(pdf, writer)
+        pag_docs += n
         if n == 0:
             skipped += 1
 
     print(f"\n\n  Guardando '{salida}'...")
+    salida.parent.mkdir(parents=True, exist_ok=True)
     with open(salida, "wb") as f:
         writer.write(f)
 
-    if not sin_comp:
-        shutil.rmtree(carpeta_temp, ignore_errors=True)
-
-    log.info("Unificación completa: %d páginas, %s", total_paginas, _mb(salida))
+    total_pag = n_sep + pag_docs
+    log.info("Unificación completa: %d páginas, %s", total_pag, _mb(salida))
     print(f"\n{'─'*58}")
     print(f"  ✓  Archivos procesados : {len(pdfs) - skipped}/{len(pdfs)}")
-    print(f"  📄  Páginas totales     : {total_paginas}")
+    print(f"  📄  Páginas separador  : {n_sep}")
+    print(f"  📄  Páginas documentos : {pag_docs}")
+    print(f"  📄  Páginas totales    : {total_pag}")
     print(f"  💾  Tamaño final        : {_mb(salida)}")
     print(f"  📁  Archivo             : {salida.resolve()}")
     print(f"{'─'*58}\n")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  COMANDO: DIVIDIR
-# ══════════════════════════════════════════════════════════════════════════════
-
-_MESES_ES = {
-    "01": "Enero", "02": "Febrero", "03": "Marzo",    "04": "Abril",
-    "05": "Mayo",  "06": "Junio",   "07": "Julio",    "08": "Agosto",
-    "09": "Septiembre", "10": "Octubre", "11": "Noviembre", "12": "Diciembre",
-}
-
-def _detectar_periodo(page, modo: str = "año") -> str | None:
-    """
-    Detecta el período de una página.
-    modo='año'  → devuelve '2023'
-    modo='mes'  → devuelve '2023-05'
-    """
-    try:
-        texto = page.extract_text() or ""
-        m = PATRON_FECHA_MES.search(texto)
-        if m:
-            año, mes = m.group(1), m.group(2)
-            return año if modo == "año" else f"{año}-{mes}"
-    except Exception:
-        pass
-    return None
-
-def _detectar_año(page) -> str | None:
-    return _detectar_periodo(page, "año")
-
-def _bytes_reales(pages: list) -> int:
-    w = PdfWriter()
-    for p in pages:
-        w.add_page(p)
-    buf = io.BytesIO()
-    w.write(buf)
-    return buf.tell()
-
-def _medir_paginas(pages: list) -> list[int]:
-    sizes = []
-    for i, page in enumerate(pages):
-        if i % 500 == 0 and i > 0:
-            print(f"    midiendo: {i}/{len(pages)}...", end="\r")
-        w = PdfWriter()
-        w.add_page(page)
-        buf = io.BytesIO()
-        w.write(buf)
-        sizes.append(buf.tell())
-    return sizes
-
-def _guardar(pages: list, ruta: Path) -> int:
-    w = PdfWriter()
-    for p in pages:
-        w.add_page(p)
-    with open(ruta, "wb") as f:
-        w.write(f)
-    return ruta.stat().st_size
-
-def _dividir_en_partes(pages, max_bytes, nombre_base, carpeta):
-    sizes      = _medir_paginas(pages)
-    archivos   = []
-    lote_idx   = []
-    acum_bytes = 0
-    num_parte  = 1
-
-    for i, (page, sz) in enumerate(zip(pages, sizes)):
-        if acum_bytes + sz >= max_bytes and lote_idx:
-            lote_pages = [pages[j] for j in lote_idx]
-            nombre     = carpeta / f"{nombre_base}_parte{num_parte}.pdf"
-            tam_real   = _guardar(lote_pages, nombre)
-            archivos.append(nombre)
-            print(f"    {nombre.name:<52} {tam_real/1_048_576:>6.1f} MB  "
-                  f"({len(lote_pages)} págs.)")
-
-            if tam_real > max_bytes and len(lote_pages) > 1:
-                archivos.pop()
-                nombre.unlink(missing_ok=True)
-                mitad = len(lote_pages) // 2
-                for chunk in [lote_pages[:mitad], lote_pages[mitad:]]:
-                    n2  = carpeta / f"{nombre_base}_parte{num_parte}.pdf"
-                    t2  = _guardar(chunk, n2)
-                    archivos.append(n2)
-                    print(f"    {n2.name:<52} {t2/1_048_576:>6.1f} MB  "
-                          f"({len(chunk)} págs.)  [ajustado]")
-                    num_parte += 1
-            else:
-                num_parte += 1
-
-            lote_idx   = []
-            acum_bytes = 0
-
-        lote_idx.append(i)
-        acum_bytes += sz
-
-    if lote_idx:
-        lote_pages = [pages[j] for j in lote_idx]
-        nombre = (
-            carpeta / f"{nombre_base}.pdf" if num_parte == 1
-            else carpeta / f"{nombre_base}_parte{num_parte}.pdf"
-        )
-        tam_real = _guardar(lote_pages, nombre)
-        archivos.append(nombre)
-        print(f"    {nombre.name:<52} {tam_real/1_048_576:>6.1f} MB  "
-              f"({len(lote_pages)} págs.)")
-
-    return archivos
-
-def cmd_dividir(args):
-    _verificar_deps([(_PYPDF_OK, "pypdf", "pypdf")])
-
-    entrada   = _path_cfg(
-        getattr(args, "entrada", None) or CFG["archivo_unificado"]
-    )
-    carpeta   = _path_cfg(
-        getattr(args, "salida", None) or CFG["carpeta_años"]
-    )
-    max_bytes = int((getattr(args, "max_mb",   None) or CFG["max_mb"]) * 1_048_576)
-    solo_año  = getattr(args, "solo_año",  None) or CFG["solo_año"]
-    solo_mes  = getattr(args, "solo_mes",  None) or None
-    modo      = getattr(args, "modo",      "año")
-    desde_raw = getattr(args, "desde",     None) or ""
-    hasta_raw = getattr(args, "hasta",     None) or ""
-    dry_run   = getattr(args, "dry_run",   False)
-    max_mb    = max_bytes / 1_048_576
-
-    if solo_mes:
-        modo = "mes"
-
-    # Normalizar rango
-    desde_iso = _fecha_a_iso(desde_raw) if desde_raw else None
-    hasta_iso = _hasta_iso(hasta_raw)   if hasta_raw else None
-
-    if not entrada.exists():
-        log.error("No se encontró '%s'.", entrada)
-        sys.exit(1)
-
-    carpeta.mkdir(exist_ok=True)
-
-    modo_label = "mes" if modo == "mes" else "año"
-    print(f"\n{'═'*58}")
-    print(f"  PASO 3 — División por {modo_label}")
-    if dry_run:
-        print("  *** MODO DRY-RUN: no se escribirá ningún archivo ***")
-    print(f"{'═'*58}")
-    print(f"  Entrada  : {entrada}  ({_mb(entrada)})")
-    print(f"  Salida   : {carpeta.resolve()}")
-    print(f"  Modo     : por {modo_label}")
-    print(f"  Límite   : {max_mb} MB por archivo")
-
-    # Mostrar filtro activo
-    if solo_mes:
-        año_f, mes_f = solo_mes.split("-") if "-" in solo_mes else (solo_mes, "")
-        nombre_mes = _MESES_ES.get(mes_f, mes_f)
-        print(f"  Filtro   : {nombre_mes} {año_f}")
-    elif solo_año:
-        print(f"  Filtro   : {solo_año}")
-    elif desde_raw or hasta_raw:
-        print(f"  Rango    : {desde_raw or '...'} → {hasta_raw or '...'}")
-    else:
-        print(f"  Filtro   : {'todos los meses' if modo == 'mes' else 'todos los años'}")
-    print()
-    log.info("División iniciada — entrada: %s  modo: %s", entrada, modo_label)
-
-    print("  Leyendo PDF...")
-    reader  = PdfReader(str(entrada), strict=False)
-    n_total = len(reader.pages)
-    print(f"  Total de páginas: {n_total}\n")
-    print("  Escaneando páginas separadoras...")
-
-    paginas_por_periodo: dict[str, list] = {}
-    periodo_actual = "sin_fecha"
-
-    for i, page in enumerate(reader.pages):
-        if i % 500 == 0:
-            print(f"    {i}/{n_total}...", end="\r")
-        periodo = _detectar_periodo(page, modo)
-        if periodo:
-            periodo_actual = periodo
-        paginas_por_periodo.setdefault(periodo_actual, []).append(page)
-
-    print(f"    {n_total}/{n_total} páginas escaneadas.     \n")
-
-    periodos = sorted(k for k in paginas_por_periodo if k != "sin_fecha")
-    if "sin_fecha" in paginas_por_periodo:
-        periodos.append("sin_fecha")
-
-    # Mostrar resumen
-    if modo == "mes":
-        print(f"  Períodos detectados ({len(periodos)} meses):")
-        for p in periodos:
-            if "-" in p:
-                año_p, mes_p = p.split("-")
-                etiq = f"{_MESES_ES.get(mes_p, mes_p)} {año_p}"
-            else:
-                etiq = p
-            print(f"    {p}  ({etiq}) : {len(paginas_por_periodo[p])} páginas")
-    else:
-        print(f"  Años detectados:")
-        for p in periodos:
-            print(f"    {p} : {len(paginas_por_periodo[p])} páginas")
-
-    # Aplicar filtros
-    if solo_mes:
-        if solo_mes not in paginas_por_periodo:
-            log.error("Período '%s' no encontrado.", solo_mes)
-            sys.exit(1)
-        paginas_por_periodo = {solo_mes: paginas_por_periodo[solo_mes]}
-        periodos = [solo_mes]
-    elif solo_año:
-        filtrado = {k: v for k, v in paginas_por_periodo.items()
-                    if k.startswith(solo_año)}
-        if not filtrado:
-            log.error("Año '%s' no encontrado.", solo_año)
-            sys.exit(1)
-        paginas_por_periodo = filtrado
-        periodos = sorted(filtrado)
-
-    # Filtrar por rango de fechas (desde/hasta)
-    if desde_iso or hasta_iso:
-        antes = len(paginas_por_periodo)
-        paginas_por_periodo = {
-            k: v for k, v in paginas_por_periodo.items()
-            if _periodo_en_rango(k, desde_iso, hasta_iso)
-        }
-        periodos = sorted(k for k in paginas_por_periodo if k != "sin_fecha")
-        if "sin_fecha" in paginas_por_periodo:
-            periodos.append("sin_fecha")
-        excluidos = antes - len(paginas_por_periodo)
-        if excluidos:
-            print(f"\n  Filtro de fechas: {excluidos} período(s) excluido(s).")
-        if not paginas_por_periodo:
-            log.warning("Ningún período cae dentro del rango de fechas indicado.")
-            return
-
-    if dry_run:
-        print("\n  [DRY-RUN] Archivos que se generarían:")
-        for p in sorted(paginas_por_periodo):
-            n = len(paginas_por_periodo[p])
-            print(f"    expediente_{p}.pdf  (~{n} páginas)")
-        log.info("Dry-run: división simulada.")
-        return
-
-    print(f"\n  Generando archivos...\n")
-    total_archivos = 0
-
-    for periodo in sorted(paginas_por_periodo):
-        pages = paginas_por_periodo[periodo]
-
-        # Etiqueta legible para la consola
-        if modo == "mes" and "-" in periodo:
-            año_p, mes_p = periodo.split("-")
-            etiq = f"{_MESES_ES.get(mes_p, mes_p)} {año_p}"
-        else:
-            etiq = periodo
-
-        nombre_base = f"expediente_{periodo}"
-        print(f"  [{etiq}]  {len(pages)} páginas")
-        tam = _bytes_reales(pages)
-
-        if tam <= max_bytes:
-            ruta     = carpeta / f"{nombre_base}.pdf"
-            tam_real = _guardar(pages, ruta)
-            print(f"    {ruta.name:<52} {tam_real/1_048_576:>6.1f} MB")
-            total_archivos += 1
-        else:
-            print(f"    ~{tam/1_048_576:.0f} MB → dividiendo en partes de {max_mb} MB...")
-            archivos = _dividir_en_partes(pages, max_bytes, nombre_base, carpeta)
-            total_archivos += len(archivos)
-
-    generados = sorted(carpeta.glob("expediente_*.pdf"))
-    tam_total  = sum(f.stat().st_size for f in generados) / 1_048_576
-
-    log.info("División completa: %d archivos, %.1f MB", total_archivos, tam_total)
-    print(f"\n{'─'*58}")
-    print(f"  ✓  Archivos generados : {total_archivos}")
-    print(f"  💾  Tamaño total       : {tam_total:.1f} MB")
-    print(f"  📁  Carpeta            : {carpeta.resolve()}")
-    print(f"{'─'*58}\n")
-    for f in generados:
-        mb = f.stat().st_size / 1_048_576
-        alerta = "  ⚠ SUPERA LÍMITE" if mb > max_mb + 1 else ""
-        print(f"  {f.name:<52} {mb:>6.1f} MB{alerta}")
-    print()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1829,15 +1651,20 @@ def cmd_todo(args):
     t_inicio = time.time()
 
     print(f"\n{'═'*58}")
-    print("  FLUJO COMPLETO: Descargar → Unir → Dividir")
+    print("  FLUJO COMPLETO: Descargar → Comprimir → Unir")
     if dry_run:
         print("  *** MODO DRY-RUN ***")
     print(f"{'═'*58}")
     log.info("Flujo completo iniciado%s", " [DRY-RUN]" if dry_run else "")
 
     cmd_descargar(args)
+    carp = _carpeta_trabajo_todo(args)
+    setattr(args, "carpeta", carp)
+    if getattr(args, "sin_comprimir", False):
+        log.info("Flujo: compresión omitida (--sin-comprimir).")
+    else:
+        cmd_comprimir(args)
     cmd_unir(args)
-    cmd_dividir(args)
 
     elapsed = time.time() - t_inicio
     mins, segs = divmod(int(elapsed), 60)
@@ -1859,12 +1686,12 @@ def cmd_todo(args):
 def _menu_interactivo():
     """Menú de texto cuando el script se corre sin argumentos."""
     opciones = {
-        "1": ("Descargar PDFs del expediente",   "descargar"),
-        "2": ("Unir PDFs en un solo archivo",     "unir"),
-        "3": ("Dividir por año",                  "dividir"),
-        "4": ("Flujo completo (1+2+3)",           "todo"),
-        "5": ("Ver estado del proyecto",          "estado"),
-        "0": ("Salir",                            "salir"),
+        "1": ("Descargar PDFs del expediente",        "descargar"),
+        "2": ("Comprimir PDFs (Ghostscript)",         "comprimir"),
+        "3": ("Unir PDFs en un solo archivo",         "unir"),
+        "4": ("Flujo completo (desc→comp→unir)",      "todo"),
+        "5": ("Ver estado del proyecto",              "estado"),
+        "0": ("Salir",                                "salir"),
     }
 
     while True:
@@ -1895,11 +1722,6 @@ def _menu_interactivo():
             calidad     = None
             workers     = None
             sin_comprimir = False
-            entrada     = None
-            max_mb      = None
-            solo_año    = None
-            solo_mes    = None
-            modo        = "año"
             concurrentes = None
             reintentos  = None
             dry_run     = False
@@ -1911,20 +1733,10 @@ def _menu_interactivo():
             if url_input:
                 a.url = url_input
             cmd_descargar(a)
+        elif cmd_nombre == "comprimir":
+            cmd_comprimir(a)
         elif cmd_nombre == "unir":
             cmd_unir(a)
-        elif cmd_nombre == "dividir":
-            modo_input = input(f"  Modo — [a]ño / [m]es (Enter = año): ").strip().lower()
-            a.modo = "mes" if modo_input.startswith("m") else "año"
-            if a.modo == "mes":
-                mes_input = input(f"  Solo mes (ej: 2023-05, Enter = todos): ").strip()
-                if mes_input:
-                    a.solo_mes = mes_input
-            else:
-                año_input = input(f"  Solo año (Enter = todos): ").strip()
-                if año_input:
-                    a.solo_año = año_input
-            cmd_dividir(a)
         elif cmd_nombre == "todo":
             url_input = input(f"  URL (Enter = config.ini): ").strip()
             if url_input:
@@ -1950,8 +1762,8 @@ Ejemplos:
   python -m pjn_scw.cli                     (menu interactivo)
   python -m pjn_scw.cli estado              (resumen del proyecto)
   python -m pjn_scw.cli descargar --url "https://..."
-  python -m pjn_scw.cli unir --calidad screen
-  python -m pjn_scw.cli dividir --max-mb 25 --solo-año 2023
+  python -m pjn_scw.cli comprimir --calidad ebook
+  python -m pjn_scw.cli unir --desde 01/01/2023 --hasta 31/12/2024
   python -m pjn_scw.cli todo --dry-run
         """,
     )
@@ -1973,34 +1785,50 @@ Ejemplos:
     _add_common(p_dl)
     p_dl.set_defaults(func=cmd_descargar)
 
+    # ── comprimir ─────────────────────────────────────────────────────────────
+    p_co = sub.add_parser(
+        "comprimir",
+        help="Comprimir PDFs de una carpeta con Ghostscript (reemplaza si baja tamaño)",
+    )
+    p_co.add_argument("--carpeta",  type=Path, help="Carpeta con PDFs")
+    p_co.add_argument(
+        "--calidad",
+        choices=["screen", "ebook", "printer", "prepress"],
+        help="Calidad Ghostscript",
+    )
+    p_co.add_argument("--workers", type=int, help="Procesos en paralelo")
+    _add_common(p_co)
+    p_co.set_defaults(func=cmd_comprimir)
+
     # ── unir ──────────────────────────────────────────────────────────────────
-    p_un = sub.add_parser("unir", help="Unir PDFs en un solo archivo")
-    p_un.add_argument("--carpeta",       type=Path, help="Carpeta con PDFs")
-    p_un.add_argument("--salida",        type=Path, help="Archivo PDF de salida")
-    p_un.add_argument("--calidad",       choices=["screen","ebook","printer","prepress"],
-                      help="Calidad Ghostscript")
-    p_un.add_argument("--workers",       type=int,  help="Procesos GS en paralelo")
-    p_un.add_argument("--sin-comprimir", action="store_true",
-                      help="Omitir Ghostscript")
+    p_un = sub.add_parser(
+        "unir",
+        help="Unir PDFs con separadores; filtro por fechas opcional (nombre del archivo)",
+    )
+    p_un.add_argument("--carpeta", type=Path, help="Carpeta con PDFs")
+    p_un.add_argument("--salida",  type=Path, help="Archivo PDF de salida")
+    p_un.add_argument(
+        "--desde",
+        type=str,
+        default=None,
+        metavar="FECHA",
+        help="Incluir solo documentos desde esta fecha (DD/MM/AAAA); default config.ini [union] desde",
+    )
+    p_un.add_argument(
+        "--hasta",
+        type=str,
+        default=None,
+        metavar="FECHA",
+        help="Incluir solo documentos hasta esta fecha (DD/MM/AAAA); default config.ini [union] hasta",
+    )
     _add_common(p_un)
     p_un.set_defaults(func=cmd_unir)
 
-    # ── dividir ───────────────────────────────────────────────────────────────
-    p_div = sub.add_parser("dividir", help="Dividir el PDF unificado por año o mes")
-    p_div.add_argument("--entrada",   type=Path,  help="PDF a dividir")
-    p_div.add_argument("--salida",    type=Path,  help="Carpeta de salida")
-    p_div.add_argument("--max-mb",    type=float, help="Tamaño máximo por archivo")
-    p_div.add_argument("--modo",      choices=["año", "mes"], default="año",
-                       help="Dividir por año (default) o por mes")
-    p_div.add_argument("--solo-año",  type=str,   help="Exportar solo un año (ej: 2023)")
-    p_div.add_argument("--solo-mes",  type=str,   help="Exportar solo un mes (ej: 2023-05)")
-    p_div.add_argument("--desde",     type=str,   help="Fecha desde (DD/MM/AAAA)")
-    p_div.add_argument("--hasta",     type=str,   help="Fecha hasta (DD/MM/AAAA)")
-    _add_common(p_div)
-    p_div.set_defaults(func=cmd_dividir)
-
     # ── todo ──────────────────────────────────────────────────────────────────
-    p_todo = sub.add_parser("todo", help="Flujo completo: descargar + unir + dividir")
+    p_todo = sub.add_parser(
+        "todo",
+        help="Flujo completo: descargar + comprimir + unir",
+    )
     p_todo.add_argument("--url",          type=str)
     p_todo.add_argument("--carpeta",      type=Path)
     p_todo.add_argument("--salida",       type=Path)
@@ -2009,8 +1837,8 @@ Ejemplos:
     p_todo.add_argument("--sin-comprimir",action="store_true")
     p_todo.add_argument("--concurrentes", type=int)
     p_todo.add_argument("--reintentos",   type=int)
-    p_todo.add_argument("--max-mb",       type=float)
-    p_todo.add_argument("--solo-año",     type=str)
+    p_todo.add_argument("--desde",        type=str, help="Paso unir: fecha desde (DD/MM/AAAA)")
+    p_todo.add_argument("--hasta",        type=str, help="Paso unir: fecha hasta (DD/MM/AAAA)")
     _add_common(p_todo)
     p_todo.set_defaults(func=cmd_todo)
 
