@@ -11,6 +11,7 @@ import io
 import threading
 import queue
 import logging
+from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
